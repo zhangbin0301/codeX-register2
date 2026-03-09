@@ -650,6 +650,136 @@ def run(proxy: Optional[str]) -> Optional[str]:
         return None
 
 
+def _safe_parse_utc(iso_utc: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except Exception:
+        return None
+
+
+def _build_account_entry(t_data: Dict[str, Any], generated_at: str) -> Dict[str, Any]:
+    email = str(t_data.get("email") or "unknown")
+
+    expires_in = 0
+    expired_at = _safe_parse_utc(str(t_data.get("expired") or ""))
+    last_refresh = _safe_parse_utc(str(t_data.get("last_refresh") or ""))
+    if expired_at and last_refresh:
+        expires_in = max(0, int((expired_at - last_refresh).total_seconds()))
+
+    credentials = {
+        "access_token": t_data.get("access_token", ""),
+        "chatgpt_account_id": t_data.get("account_id", ""),
+        "chatgpt_user_id": "",
+        "client_id": CLIENT_ID,
+        "email": email,
+        "expires_at": generated_at,
+        "expires_in": expires_in,
+        "id_token": t_data.get("id_token", ""),
+        "organization_id": "",
+        "refresh_token": t_data.get("refresh_token", ""),
+    }
+
+    extra = {
+        "codex_5h_reset_after_seconds": 0,
+        "codex_5h_reset_at": generated_at,
+        "codex_5h_used_percent": 0,
+        "codex_5h_window_minutes": 0,
+        "codex_7d_reset_after_seconds": 0,
+        "codex_7d_reset_at": generated_at,
+        "codex_7d_used_percent": 0,
+        "codex_7d_window_minutes": 0,
+        "codex_primary_over_secondary_percent": 0,
+        "codex_primary_reset_after_seconds": 0,
+        "codex_primary_used_percent": 0,
+        "codex_primary_window_minutes": 0,
+        "codex_secondary_reset_after_seconds": 0,
+        "codex_secondary_used_percent": 0,
+        "codex_secondary_window_minutes": 0,
+        "codex_usage_updated_at": generated_at,
+        "email": email,
+        "openai_oauth_responses_websockets_v2_enabled": False,
+        "openai_oauth_responses_websockets_v2_mode": "off",
+    }
+
+    return {
+        "name": email,
+        "platform": "openai",
+        "type": t_data.get("type", "oauth"),
+        "credentials": credentials,
+        "extra": extra,
+        "concurrency": 10,
+        "priority": 1,
+        "rate_multiplier": 1,
+        "auto_pause_on_expired": True,
+    }
+
+
+def build_export_payload_from_tokens(
+    token_json_list: list[str], generated_at_dt: Optional[datetime] = None
+) -> Dict[str, Any]:
+    generated_at_dt = generated_at_dt or datetime.now().astimezone()
+    generated_at = generated_at_dt.isoformat(timespec="seconds")
+
+    accounts: list[Dict[str, Any]] = []
+    for token_json in token_json_list:
+        t_data: Dict[str, Any] = {}
+        try:
+            t_data = json.loads(token_json)
+        except Exception:
+            t_data = {}
+        accounts.append(_build_account_entry(t_data, generated_at))
+
+    return {
+        "exported_at": generated_at,
+        "proxies": [],
+        "account_count": len(accounts),
+        "accounts": accounts,
+    }
+
+
+def build_export_payload(token_json: str, generated_at_dt: Optional[datetime] = None) -> Dict[str, Any]:
+    return build_export_payload_from_tokens([token_json], generated_at_dt)
+
+
+def build_export_file_name(generated_at_dt: datetime) -> str:
+    return f"sub2api-account-{generated_at_dt.strftime('%Y%m%d%H%M%S')}.json"
+
+
+def _resolve_export_path(output_dir: str, generated_at_dt: datetime) -> str:
+    base_name = build_export_file_name(generated_at_dt)
+    out_path = os.path.join(output_dir, base_name)
+    if not os.path.exists(out_path):
+        return out_path
+
+    stem, ext = os.path.splitext(base_name)
+    i = 1
+    while True:
+        candidate = os.path.join(output_dir, f"{stem}-{i}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def save_export_file_batch(output_dir: str, token_json_list: list[str]) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    generated_at_dt = datetime.now().astimezone()
+    export_data = build_export_payload_from_tokens(token_json_list, generated_at_dt)
+
+    out_path = _resolve_export_path(output_dir, generated_at_dt)
+    export_data["generated_file_name"] = os.path.basename(out_path)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+    return out_path
+
+
+def save_export_file(output_dir: str, token_json: str) -> str:
+    return save_export_file_batch(output_dir, [token_json])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
     parser.add_argument(
@@ -678,96 +808,8 @@ def main() -> None:
             token_json = run(args.proxy)
 
             if token_json:
-                try:
-                    t_data = json.loads(token_json)
-                    email = t_data.get("email", "unknown")
-                    fname_email = email.replace("@", "_")
-                except Exception:
-                    email = "unknown"
-                    fname_email = "unknown"
-
-                # 构造与示例文件一致的导出格式
-                exported_at = datetime.utcnow().replace(tzinfo=timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-
-                # 计算过期秒数（如果可能）
-                expires_in = 0
-                expired_at_str = t_data.get("expired") or ""
-                last_refresh_str = t_data.get("last_refresh") or ""
-                try:
-                    if expired_at_str and last_refresh_str:
-                        expired_at = datetime.strptime(
-                            expired_at_str, "%Y-%m-%dT%H:%M:%SZ"
-                        ).replace(tzinfo=timezone.utc)
-                        last_refresh = datetime.strptime(
-                            last_refresh_str, "%Y-%m-%dT%H:%M:%SZ"
-                        ).replace(tzinfo=timezone.utc)
-                        expires_in = max(
-                            0, int((expired_at - last_refresh).total_seconds())
-                        )
-                except Exception:
-                    expires_in = 0
-
-                credentials = {
-                    "access_token": t_data.get("access_token", ""),
-                    "chatgpt_account_id": t_data.get("account_id", ""),
-                    "chatgpt_user_id": "",
-                    "client_id": CLIENT_ID,
-                    "email": email,
-                    "expires_at": expired_at_str,
-                    "expires_in": expires_in,
-                    "id_token": t_data.get("id_token", ""),
-                    "organization_id": "",
-                    "refresh_token": t_data.get("refresh_token", ""),
-                }
-
-                extra = {
-                    "codex_5h_reset_after_seconds": 0,
-                    "codex_5h_reset_at": exported_at,
-                    "codex_5h_used_percent": 0,
-                    "codex_5h_window_minutes": 0,
-                    "codex_7d_reset_after_seconds": 0,
-                    "codex_7d_reset_at": exported_at,
-                    "codex_7d_used_percent": 0,
-                    "codex_7d_window_minutes": 0,
-                    "codex_primary_over_secondary_percent": 0,
-                    "codex_primary_reset_after_seconds": 0,
-                    "codex_primary_used_percent": 0,
-                    "codex_primary_window_minutes": 0,
-                    "codex_secondary_reset_after_seconds": 0,
-                    "codex_secondary_used_percent": 0,
-                    "codex_secondary_window_minutes": 0,
-                    "codex_usage_updated_at": exported_at,
-                    "email": email,
-                    "openai_oauth_responses_websockets_v2_enabled": False,
-                    "openai_oauth_responses_websockets_v2_mode": "off",
-                }
-
-                export_data = {
-                    "exported_at": exported_at,
-                    "proxies": [args.proxy] if args.proxy else [],
-                    "accounts": [
-                        {
-                            "name": email,
-                            "platform": "openai",
-                            "type": t_data.get("type", "oauth"),
-                            "credentials": credentials,
-                            "extra": extra,
-                            "concurrency": 10,
-                            "priority": 1,
-                            "rate_multiplier": 1,
-                            "auto_pause_on_expired": True,
-                        }
-                    ],
-                }
-
-                file_name = f"token_{fname_email}_{int(time.time())}.json"
-
-                with open(file_name, "w", encoding="utf-8") as f:
-                    json.dump(export_data, f, ensure_ascii=False, indent=2)
-
-                print(f"[*] 成功! Token 已保存至: {file_name}")
+                out_path = save_export_file(os.getcwd(), token_json)
+                print(f"[*] 成功! Token 已保存至: {out_path}")
             else:
                 print("[-] 本次注册失败。")
 

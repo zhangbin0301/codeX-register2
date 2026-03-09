@@ -1,8 +1,9 @@
 {
-  "proxy": "",
+  "proxy": "http://127.0.0.1:7890",
   "sleep_min": 5,
   "sleep_max": 10,
-  "once_mode": true,
-  "output_dir": "E:\\Desktop\\注册机",
-  "thread_count": 3
+  "output_dir": "D:/Desktop/codex账号",
+  "thread_count": 10,
+  "process_count": 1,
+  "once_mode": false
 }
