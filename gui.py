@@ -1,1111 +1,2473 @@
+#!/usr/bin/env python3
+"""
+CodeX Register Web 控制台（Naive UI）。
+
+职责：
+- 提供本地 HTTP 服务，使用 Vue3 + Naive UI 构建 Web UI；
+- 默认用 pywebview 打包为独立应用窗口显示（可切换浏览器模式）；
+- 读写 gui_config.json，并将核心配置同步到环境变量；
+- 在后台线程执行 r_with_pwd.run，实时采集日志；
+- 管理 accounts_*.json、accounts.txt、本地同步与管理端拉取。
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
 import json
-import multiprocessing as mp
 import os
-import queue
 import random
+import ssl
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from collections import deque
 from datetime import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 
-import openai_register as registrar
+CONFIG_FILE = "gui_config.json"
+ACCOUNTS_TXT = "accounts.txt"
 
+# 默认配置（缺省键在 load_config 时与文件/.env 合并）
+DEFAULT_CONFIG = {
+    "num_accounts": 1,
+    "sleep_min": 5,
+    "sleep_max": 30,
+    "proxy": "",
+    "worker_domain": "",
+    "freemail_username": "",
+    "freemail_password": "",
+    "openai_ssl_verify": True,
+    "skip_net_check": False,
+    "accounts_sync_api_url": "https://one.ytb.icu/api/v1/admin/accounts/data",
+    "accounts_sync_bearer_token": "",
+    "accounts_list_api_base": "https://one.ytb.icu/api/v1/admin/accounts",
+    "accounts_list_page_size": 10,
+    "accounts_list_timezone": "Asia/Shanghai",
+}
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "gui_config.json")
-LOG_PATH = os.path.join(BASE_DIR, "register.log")
-
-
-def _mp_queue_log(log_queue, process_id: int, thread_id: int, text: str) -> None:
-    prefix = f"[进程{process_id}-线程{thread_id}] "
-    for part in str(text).splitlines(keepends=True):
-        if part:
-            log_queue.put({"type": "log", "text": prefix + part})
-
-
-class MPThreadLogWriter:
-    def __init__(self, process_id: int, thread_ids_map: dict, log_queue):
-        self._process_id = process_id
-        self._thread_ids = thread_ids_map
-        self._queue = log_queue
-        self._lock = threading.Lock()
-        self._pending: dict = {}
-
-    def write(self, s: str) -> None:
-        if not s:
-            return
-        with self._lock:
-            tid = self._thread_ids.get(threading.current_thread(), 0)
-            if not tid:
-                tid = 0
-            buf = str(self._pending.get(tid, "")) + str(s)
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                _mp_queue_log(self._queue, self._process_id, int(tid), line + "\n")
-            self._pending[tid] = buf
-
-    def flush(self) -> None:
-        with self._lock:
-            for tid, buf in list(self._pending.items()):
-                if not buf:
-                    continue
-                _mp_queue_log(self._queue, self._process_id, int(tid), str(buf))
-                self._pending[tid] = ""
+# Cloudflare 等会拦截 urllib 默认 User-Agent；管理端 API 使用常见桌面 Chrome 指纹。
+_HTTP_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
 
 
-def _mp_thread_loop(
-    process_id: int,
-    thread_id: int,
-    target_accounts: int,
-    proxy: str | None,
-    retry_sleep_min: int,
-    retry_sleep_max: int,
-    stop_event,
-    log_queue,
-    collected_tokens: list[str],
-    collected_lock: threading.Lock,
-) -> None:
-    attempt = 0
-    _mp_queue_log(log_queue, process_id, thread_id, f"[Info] 线程 {thread_id} 已启动。\n")
-
-    while not stop_event.is_set():
-        with collected_lock:
-            if len(collected_tokens) >= target_accounts:
-                break
-
-        attempt += 1
-        _mp_queue_log(
-            log_queue,
-            process_id,
-            thread_id,
-            f"[{datetime.now().strftime('%H:%M:%S')}] >>> 第 {attempt} 次注册尝试 <<<\n",
-        )
-
-        try:
-            token_json = registrar.run(proxy)
-            if token_json:
-                with collected_lock:
-                    if len(collected_tokens) < target_accounts:
-                        collected_tokens.append(token_json)
-                        current = len(collected_tokens)
-                    else:
-                        current = len(collected_tokens)
-
-                _mp_queue_log(
-                    log_queue,
-                    process_id,
-                    thread_id,
-                    f"[*] 注册成功，已收集 {current}/{target_accounts}\n",
-                )
-                if current >= target_accounts:
-                    stop_event.set()
-                    break
-                continue
-
-            _mp_queue_log(log_queue, process_id, thread_id, "[-] 本次注册失败，自动重试。\n")
-        except Exception as e:
-            _mp_queue_log(log_queue, process_id, thread_id, f"[Error] 注册异常: {e}，自动重试。\n")
-
-        wait_time = random.randint(retry_sleep_min, retry_sleep_max)
-        for _ in range(wait_time):
-            if stop_event.is_set():
-                break
-            time.sleep(1)
-
-    _mp_queue_log(log_queue, process_id, thread_id, f"[Info] 线程 {thread_id} 已结束。\n")
-
-
-def mp_process_worker(
-    process_id: int,
-    accounts_per_file: int,
-    proxy: str | None,
-    retry_sleep_min: int,
-    retry_sleep_max: int,
-    output_dir: str,
-    external_stop_event,
-    log_queue,
-) -> None:
-    thread_ids_map: dict = {}
-    writer = MPThreadLogWriter(process_id, thread_ids_map, log_queue)
-    saved_stdout, saved_stderr = sys.stdout, sys.stderr
-    sys.stdout = sys.stderr = writer
-
-    collected_tokens: list[str] = []
-    collected_lock = threading.Lock()
-    local_stop = threading.Event()
-
-    def merged_stop() -> bool:
-        return external_stop_event.is_set() or local_stop.is_set()
-
-    class _StopProxy:
-        def is_set(self):
-            return merged_stop()
-
-        def set(self):
-            local_stop.set()
-
-    stop_proxy = _StopProxy()
-
-    workers: list[threading.Thread] = []
-    for i in range(accounts_per_file):
-        t = threading.Thread(
-            target=_mp_thread_loop,
-            args=(
-                process_id,
-                i + 1,
-                accounts_per_file,
-                proxy,
-                retry_sleep_min,
-                retry_sleep_max,
-                stop_proxy,
-                log_queue,
-                collected_tokens,
-                collected_lock,
-            ),
-            daemon=True,
-        )
-        thread_ids_map[t] = i + 1
-        workers.append(t)
-        t.start()
-
-    for t in workers:
-        t.join()
-
-    exported_path = ""
-    success_count = 0
-    with collected_lock:
-        success_count = len(collected_tokens)
-        tokens = list(collected_tokens[:accounts_per_file])
-
-    if not external_stop_event.is_set() and success_count >= accounts_per_file:
-        try:
-            exported_path = registrar.save_export_file_batch(output_dir, tokens)
-            log_queue.put(
-                {
-                    "type": "exported",
-                    "process_id": process_id,
-                    "path": exported_path,
-                    "count": accounts_per_file,
-                }
-            )
-        except Exception as e:
-            _mp_queue_log(log_queue, process_id, 0, f"[Error] 导出失败: {e}\n")
-
-    sys.stdout = saved_stdout
-    sys.stderr = saved_stderr
-
-    log_queue.put(
-        {
-            "type": "done",
-            "process_id": process_id,
-            "success_count": success_count,
-            "target_count": accounts_per_file,
-            "exported_path": exported_path,
-        }
-    )
-
-
-def load_config() -> dict:
-    default = {
-        "proxy": "",
-        "sleep_min": 5,
-        "sleep_max": 10,
-        "output_dir": BASE_DIR,
-        "thread_count": 3,
-        "process_count": 1,
-    }
+def _parse_env(path: str = ".env") -> dict[str, str]:
+    """简易 .env 解析（仅用于首次补全 Worker 等配置）。"""
+    kv: dict[str, str] = {}
+    if not os.path.exists(path):
+        return kv
     try:
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            default.update(data or {})
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
+                if k:
+                    kv[k] = v
     except Exception:
         pass
-    # 校正数值
-    try:
-        default["sleep_min"] = max(1, int(default.get("sleep_min", 5)))
-    except Exception:
-        default["sleep_min"] = 5
-    try:
-        default["sleep_max"] = max(
-            default["sleep_min"], int(default.get("sleep_max", default["sleep_min"]))
-        )
-    except Exception:
-        default["sleep_max"] = default["sleep_min"]
-    try:
-        default["thread_count"] = max(1, min(32, int(default.get("thread_count", 3))))
-    except Exception:
-        default["thread_count"] = 3
-    try:
-        default["process_count"] = max(
-            1, min(16, int(default.get("process_count", 1)))
-        )
-    except Exception:
-        default["process_count"] = 1
-    out = str(default.get("output_dir") or BASE_DIR)
-    if not os.path.isabs(out):
-        out = os.path.join(BASE_DIR, out)
-    default["output_dir"] = out
-    return default
+    return kv
 
 
-def save_config(cfg: dict) -> None:
-    try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        messagebox.showwarning("保存配置失败", f"保存配置文件出错：{e}")
-
-
-class QueueWriter:
-    """将 stdout/stderr 写入到 Tk 文本框的简单 writer。"""
-
-    def __init__(self, callback):
-        self.callback = callback
-
-    def write(self, s: str) -> None:
-        if not s:
-            return
-        # stdout 可能传入多次换行，这里简单拆分
-        for part in str(s).splitlines(keepends=True):
-            if part:
-                self.callback(part)
-
-    def flush(self) -> None:
-        pass
-
-
-class ThreadSafeLogWriter:
-    """多线程下带线程 ID 前缀的 writer，供 sys.stdout 使用。"""
-
-    def __init__(self, thread_ids_map: dict, schedule_callback):
-        self._thread_ids = thread_ids_map
-        self._schedule = schedule_callback  # (msg: str) -> None，在主线程追加日志
-        self._lock = threading.Lock()
-        self._pending: dict = {}
-
-    def write(self, s: str) -> None:
-        if not s:
-            return
-        with self._lock:
-            tid = self._thread_ids.get(threading.current_thread(), "?")
-            prefix = f"[线程{tid}] "
-            buf = str(self._pending.get(tid, "")) + str(s)
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                self._schedule(prefix + line + "\n")
-            self._pending[tid] = buf
-
-    def flush(self) -> None:
-        with self._lock:
-            for tid, buf in list(self._pending.items()):
-                if not buf:
-                    continue
-                prefix = f"[线程{tid}] "
-                self._schedule(prefix + str(buf))
-                self._pending[tid] = ""
-
-
-class RegistrarGUI:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("OpenAI 注册机 GUI")
-        self.root.geometry("1000x680")
-        self.root.minsize(900, 600)
-
-        # 使用 ttk 主题，简洁一些
-        style = ttk.Style()
-        # 根据系统可用主题选择一个较现代的
-        # "clam", "vista", "xpnative", "default"
-        style.theme_use("xpnative")
-
-        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 14, "bold"))
-        style.configure("Status.TLabel", font=("Consolas", 10))
-
-        self.config = load_config()
-
-        # 线程控制（多线程注册）
-        self.worker_threads: list[threading.Thread] = []
-        self.thread_ids_map: dict = {}  # current_thread() -> 线程编号 1..N
-        self.stop_event = threading.Event()
-        self.running_lock = threading.Lock()
-        self.is_running = False
-        self._workers_finished_lock = threading.Lock()
-        self._workers_finished_count = 0
-        self.mp_processes: list[Any] = []
-        self.mp_stop_event = None
-        self.mp_log_queue = None
-        self.mp_done_count = 0
-        self.mp_mode = False
-
-        # 日志缓冲，既写文件又展示
-        self.log_file = None
-        self._open_log_file()
-
-        self._build_ui()
-        self._load_initial_values()
-        self.refresh_accounts()
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    # ================= UI 构建 =================
-    def _build_ui(self) -> None:
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        self.tab_register = ttk.Frame(notebook)
-        self.tab_accounts = ttk.Frame(notebook)
-        self.tab_config = ttk.Frame(notebook)
-
-        notebook.add(self.tab_register, text="注册与日志")
-        notebook.add(self.tab_accounts, text="账号 JSON 管理")
-        notebook.add(self.tab_config, text="配置")
-
-        self._build_register_tab()
-        self._build_accounts_tab()
-        self._build_config_tab()
-
-    # ---------- 注册与日志 ----------
-    def _build_register_tab(self) -> None:
-        frame_top = ttk.Frame(self.tab_register)
-        frame_top.pack(fill=tk.X, padx=4, pady=4)
-
-        # 行 1：重试等待
-        row2 = ttk.Frame(frame_top)
-        row2.pack(fill=tk.X, pady=2)
-
-        ttk.Label(row2, text="重试等待 (秒):", width=12).pack(side=tk.LEFT)
-        self.var_sleep_min = tk.StringVar()
-        self.var_sleep_max = tk.StringVar()
-        spin_min = ttk.Spinbox(
-            row2, textvariable=self.var_sleep_min, from_=1, to=86400, width=7
-        )
-        spin_max = ttk.Spinbox(
-            row2, textvariable=self.var_sleep_max, from_=1, to=86400, width=7
-        )
-        spin_min.pack(side=tk.LEFT)
-        ttk.Label(row2, text=" - ").pack(side=tk.LEFT)
-        spin_max.pack(side=tk.LEFT)
-
-        ttk.Label(row2, text="  同时注册账号数量:", width=14).pack(
-            side=tk.LEFT, padx=(12, 0)
-        )
-        self.var_thread_count = tk.StringVar()
-        ttk.Spinbox(
-            row2, textvariable=self.var_thread_count, from_=1, to=32, width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(row2, text="  文件数量(进程):", width=13).pack(side=tk.LEFT, padx=(12, 0))
-        self.var_process_count = tk.StringVar()
-        ttk.Spinbox(
-            row2, textvariable=self.var_process_count, from_=1, to=16, width=5
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(row2, text="   输出目录:", width=10).pack(side=tk.LEFT, padx=(12, 0))
-        self.var_output_dir = tk.StringVar()
-        entry_out = ttk.Entry(row2, textvariable=self.var_output_dir, width=40)
-        entry_out.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        btn_browse = ttk.Button(row2, text="浏览...", command=self._choose_output_dir)
-        btn_browse.pack(side=tk.LEFT, padx=(4, 0))
-
-        # 行 3：控制按钮与状态
-        row3 = ttk.Frame(frame_top)
-        row3.pack(fill=tk.X, pady=4)
-
-        self.btn_start = ttk.Button(row3, text="开始注册", command=self.start_worker)
-        self.btn_stop = ttk.Button(
-            row3, text="停止", command=self.stop_worker, state=tk.DISABLED
-        )
-        self.btn_start.pack(side=tk.LEFT)
-        self.btn_stop.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.var_status = tk.StringVar(value="状态：空闲")
-        lbl_status = ttk.Label(row3, textvariable=self.var_status, style="Status.TLabel")
-        lbl_status.pack(side=tk.RIGHT)
-
-        # 日志区
-        frame_log = ttk.LabelFrame(self.tab_register, text="注册日志（实时）")
-        frame_log.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
-
-        self.txt_log = tk.Text(
-            frame_log,
-            wrap=tk.WORD,
-            font=("Consolas", 10),
-            state=tk.DISABLED,
-            bg="#111111",
-            fg="#DDDDDD",
-        )
-        self.txt_log.tag_configure("log_info", foreground="#8ecdf8")
-        self.txt_log.tag_configure("log_warn", foreground="#ffca80")
-        self.txt_log.tag_configure("log_error", foreground="#ff8a8a")
-        self.txt_log.tag_configure("log_success", foreground="#8be28b")
-        self.txt_log.tag_configure("log_title", foreground="#79e2f2")
-        scroll_y = ttk.Scrollbar(frame_log, orient=tk.VERTICAL, command=self.txt_log.yview)
-        self.txt_log.configure(yscrollcommand=scroll_y.set)
-
-        self.txt_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-
-        row_log_btn = ttk.Frame(self.tab_register)
-        row_log_btn.pack(fill=tk.X, padx=4, pady=(0, 4))
-
-        ttk.Button(row_log_btn, text="清空日志显示", command=self.clear_log_display).pack(
-            side=tk.LEFT
-        )
-        ttk.Button(row_log_btn, text="打开日志文件所在目录", command=self.open_log_dir).pack(
-            side=tk.LEFT, padx=(6, 0)
-        )
-
-    # ---------- 账号 JSON 管理 ----------
-    def _build_accounts_tab(self) -> None:
-        frame_main = ttk.Frame(self.tab_accounts)
-        frame_main.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
-        # 左侧列表
-        frame_left = ttk.Frame(frame_main)
-        frame_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
-
-        lbl_title = ttk.Label(frame_left, text="已生成的导出 JSON", style="Title.TLabel")
-        lbl_title.pack(anchor=tk.W, pady=(0, 4))
-
-        columns = ("file", "exported_at", "account_count", "accounts")
-        self.tree_accounts = ttk.Treeview(
-            frame_left,
-            columns=columns,
-            show="headings",
-            height=18,
-            selectmode="browse",
-        )
-        self.tree_accounts.heading("file", text="生成名字")
-        self.tree_accounts.heading("exported_at", text="生成时间")
-        self.tree_accounts.heading("account_count", text="账号数")
-        self.tree_accounts.heading("accounts", text="文件下账号")
-        self.tree_accounts.column("file", width=230, anchor=tk.W)
-        self.tree_accounts.column("exported_at", width=160, anchor=tk.W)
-        self.tree_accounts.column("account_count", width=70, anchor=tk.CENTER)
-        self.tree_accounts.column("accounts", width=260, anchor=tk.W)
-
-        scroll_y = ttk.Scrollbar(
-            frame_left, orient=tk.VERTICAL, command=self.tree_accounts.yview
-        )
-        self.tree_accounts.configure(yscrollcommand=scroll_y.set)
-
-        self.tree_accounts.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.tree_accounts.bind("<<TreeviewSelect>>", self.on_account_select)
-
-        # 按钮列：改为一列竖排
-        frame_left_btn = ttk.Frame(frame_left)
-        frame_left_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0), pady=(0, 0))
-
-        ttk.Button(frame_left_btn, text="刷新列表", command=self.refresh_accounts).pack(
-            side=tk.TOP, fill=tk.X, pady=(0, 4)
-        )
-        ttk.Button(
-            frame_left_btn, text="删除所选 JSON", command=self.delete_selected_account
-        ).pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
-        ttk.Button(
-            frame_left_btn,
-            text="在资源管理器中打开目录",
-            command=self.open_output_dir,
-        ).pack(side=tk.TOP, fill=tk.X)
-
-        # 右侧详细内容
-        frame_right = ttk.LabelFrame(frame_main, text="JSON 详细内容（只读预览）")
-        frame_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
-
-        self.var_selected_file = tk.StringVar()
-        ttk.Label(frame_right, textvariable=self.var_selected_file).pack(
-            anchor=tk.W, padx=4, pady=(2, 2)
-        )
-
-        # 中间区域：JSON 预览 + 滚动条
-        frame_preview = ttk.Frame(frame_right)
-        frame_preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.txt_json_preview = tk.Text(
-            frame_preview,
-            wrap=tk.NONE,
-            font=("Consolas", 10),
-            state=tk.DISABLED,
-        )
-        scroll_y2 = ttk.Scrollbar(
-            frame_preview, orient=tk.VERTICAL, command=self.txt_json_preview.yview
-        )
-        scroll_x2 = ttk.Scrollbar(
-            frame_preview, orient=tk.HORIZONTAL, command=self.txt_json_preview.xview
-        )
-        self.txt_json_preview.configure(
-            yscrollcommand=scroll_y2.set, xscrollcommand=scroll_x2.set
-        )
-
-        frame_preview.rowconfigure(0, weight=1)
-        frame_preview.columnconfigure(0, weight=1)
-
-        self.txt_json_preview.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
-        scroll_y2.grid(row=0, column=1, sticky="ns")
-        scroll_x2.grid(row=1, column=0, sticky="ew")
-
-        # 右侧按钮列
-        frame_right_btn = ttk.Frame(frame_right)
-        frame_right_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=4, pady=(0, 4))
-
-        ttk.Button(
-            frame_right_btn,
-            text="用默认程序打开此文件",
-            command=self.open_selected_file_external,
-        ).pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
-
-    # ---------- 配置 ----------
-    def _build_config_tab(self) -> None:
-        frame = ttk.LabelFrame(self.tab_config, text="全局配置（下次启动仍然生效）")
-        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # 代理
-        row1 = ttk.Frame(frame)
-        row1.pack(fill=tk.X, pady=4)
-        ttk.Label(row1, text="默认代理地址:", width=14).pack(side=tk.LEFT)
-        self.var_cfg_proxy = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.var_cfg_proxy).pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
-
-        # 等待时间
-        row2 = ttk.Frame(frame)
-        row2.pack(fill=tk.X, pady=4)
-        ttk.Label(row2, text="默认等待区间:", width=14).pack(side=tk.LEFT)
-        self.var_cfg_sleep_min = tk.StringVar()
-        self.var_cfg_sleep_max = tk.StringVar()
-        ttk.Spinbox(
-            row2, textvariable=self.var_cfg_sleep_min, from_=1, to=86400, width=7
-        ).pack(side=tk.LEFT)
-        ttk.Label(row2, text=" - ").pack(side=tk.LEFT)
-        ttk.Spinbox(
-            row2, textvariable=self.var_cfg_sleep_max, from_=1, to=86400, width=7
-        ).pack(side=tk.LEFT)
-
-        # 并发线程数
-        row4 = ttk.Frame(frame)
-        row4.pack(fill=tk.X, pady=4)
-        ttk.Label(row4, text="默认同时注册账号数量:", width=14).pack(side=tk.LEFT)
-        self.var_cfg_thread_count = tk.StringVar()
-        ttk.Spinbox(
-            row4, textvariable=self.var_cfg_thread_count, from_=1, to=32, width=5
-        ).pack(side=tk.LEFT)
-        ttk.Label(row4, text=" (1~32)").pack(side=tk.LEFT)
-
-        row4b = ttk.Frame(frame)
-        row4b.pack(fill=tk.X, pady=4)
-        ttk.Label(row4b, text="默认文件数量(进程):", width=14).pack(side=tk.LEFT)
-        self.var_cfg_process_count = tk.StringVar()
-        ttk.Spinbox(
-            row4b, textvariable=self.var_cfg_process_count, from_=1, to=16, width=5
-        ).pack(side=tk.LEFT)
-        ttk.Label(row4b, text=" (1~16)").pack(side=tk.LEFT)
-
-        # 输出目录
-        row5 = ttk.Frame(frame)
-        row5.pack(fill=tk.X, pady=4)
-        ttk.Label(row5, text="默认输出目录:", width=14).pack(side=tk.LEFT)
-        self.var_cfg_output_dir = tk.StringVar()
-        ttk.Entry(row5, textvariable=self.var_cfg_output_dir).pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
-        ttk.Button(
-            row5,
-            text="浏览...",
-            command=self._choose_cfg_output_dir,
-        ).pack(side=tk.LEFT, padx=(4, 0))
-
-        # 保存按钮
-        row_btn = ttk.Frame(frame)
-        row_btn.pack(fill=tk.X, pady=12)
-        ttk.Button(row_btn, text="保存配置", command=self.on_save_config).pack(
-            side=tk.LEFT
-        )
-
-    # ================= 配置加载/保存 =================
-    def _load_initial_values(self) -> None:
-        cfg = self.config
-        self.var_sleep_min.set(str(cfg.get("sleep_min", 5)))
-        self.var_sleep_max.set(str(cfg.get("sleep_max", 10)))
-        self.var_thread_count.set(str(cfg.get("thread_count", 3)))
-        self.var_process_count.set(str(cfg.get("process_count", 1)))
-        self.var_output_dir.set(cfg.get("output_dir", BASE_DIR))
-
-        # 在“配置”页中展示并保存真实代理配置
-        self.var_cfg_proxy.set(cfg.get("proxy", ""))
-        self.var_cfg_sleep_min.set(str(cfg.get("sleep_min", 5)))
-        self.var_cfg_sleep_max.set(str(cfg.get("sleep_max", 10)))
-        self.var_cfg_thread_count.set(str(cfg.get("thread_count", 3)))
-        self.var_cfg_process_count.set(str(cfg.get("process_count", 1)))
-        self.var_cfg_output_dir.set(cfg.get("output_dir", BASE_DIR))
-
-    def _choose_output_dir(self) -> None:
-        cur = self.var_output_dir.get() or BASE_DIR
-        directory = filedialog.askdirectory(
-            title="选择 JSON 输出目录", initialdir=cur if os.path.isdir(cur) else BASE_DIR
-        )
-        if directory:
-            self.var_output_dir.set(directory)
-
-    def _choose_cfg_output_dir(self) -> None:
-        cur = self.var_cfg_output_dir.get() or BASE_DIR
-        directory = filedialog.askdirectory(
-            title="选择默认输出目录", initialdir=cur if os.path.isdir(cur) else BASE_DIR
-        )
-        if directory:
-            self.var_cfg_output_dir.set(directory)
-
-    def on_save_config(self) -> None:
+def load_config() -> dict[str, Any]:
+    """加载 gui_config.json，并可在 Worker 为空时用 .env 补全后回写。"""
+    cfg = DEFAULT_CONFIG.copy()
+    if os.path.exists(CONFIG_FILE):
         try:
-            sleep_min = max(1, int(self.var_cfg_sleep_min.get() or 5))
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg.update(json.load(f))
         except Exception:
-            sleep_min = 5
-        try:
-            sleep_max = max(sleep_min, int(self.var_cfg_sleep_max.get() or sleep_min))
-        except Exception:
-            sleep_max = sleep_min
-
-        try:
-            thread_count = max(
-                1, min(32, int(self.var_cfg_thread_count.get() or 3))
-            )
-        except Exception:
-            thread_count = 3
-        try:
-            process_count = max(
-                1, min(16, int(self.var_cfg_process_count.get() or 1))
-            )
-        except Exception:
-            process_count = 1
-        cfg = {
-            "proxy": self.var_cfg_proxy.get().strip(),
-            "sleep_min": sleep_min,
-            "sleep_max": sleep_max,
-            "thread_count": thread_count,
-            "process_count": process_count,
-            "output_dir": self.var_cfg_output_dir.get().strip() or BASE_DIR,
-        }
-        self.config = cfg
-        save_config(cfg)
-        messagebox.showinfo("配置已保存", "全局配置已成功保存。")
-
-    # ================= 日志处理 =================
-    def _open_log_file(self) -> None:
-        try:
-            self.log_file = open(LOG_PATH, "a", encoding="utf-8")
-            # 简单写入启动时间
-            self.log_file.write(
-                f"\n\n===== GUI 启动于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====\n"
-            )
-            self.log_file.flush()
-        except Exception:
-            self.log_file = None
-
-    def append_log(self, text: str) -> None:
-        """在 UI 线程中追加日志到文本框，同时写入文件。"""
-        ts = datetime.now().strftime("[%H:%M:%S] ")
-        full = text if (text.startswith("[") and "]" in text[:10]) else ts + text
-
-        self.txt_log.configure(state=tk.NORMAL)
-        for part in full.splitlines(keepends=True):
-            tag = None
-            low = part.lower()
-            if ">>>" in part:
-                tag = "log_title"
-            elif "[error]" in low or "失败" in part or "超时" in part:
-                tag = "log_error"
-            elif "[warning]" in low or "警告" in part:
-                tag = "log_warn"
-            elif "成功" in part or "已保存至" in part:
-                tag = "log_success"
-            elif "[info]" in low:
-                tag = "log_info"
-
-            if tag:
-                self.txt_log.insert(tk.END, part, tag)
-            else:
-                self.txt_log.insert(tk.END, part)
-
-        self.txt_log.see(tk.END)
-        self.txt_log.configure(state=tk.DISABLED)
-
-        # 写入文件
-        if self.log_file:
-            try:
-                self.log_file.write(full)
-                if not full.endswith("\n"):
-                    self.log_file.write("\n")
-                self.log_file.flush()
-            except Exception:
-                pass
-
-    def clear_log_display(self) -> None:
-        self.txt_log.configure(state=tk.NORMAL)
-        self.txt_log.delete("1.0", tk.END)
-        self.txt_log.configure(state=tk.DISABLED)
-
-    def open_log_dir(self) -> None:
-        try:
-            os.startfile(BASE_DIR)
-        except Exception as e:
-            messagebox.showwarning("打开目录失败", f"无法打开目录：{e}")
-
-    # ================= 账号 JSON 管理 =================
-    def get_output_dir(self) -> str:
-        path = self.var_output_dir.get().strip() or BASE_DIR
-        if not os.path.isabs(path):
-            path = os.path.join(BASE_DIR, path)
-        return path
-
-    def refresh_accounts(self) -> None:
-        out_dir = self.get_output_dir()
-        for item in self.tree_accounts.get_children():
-            self.tree_accounts.delete(item)
-
-        if not os.path.isdir(out_dir):
-            return
-
-        files = [f for f in os.listdir(out_dir) if f.endswith(".json")]
-        files.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-
-        for fname in files:
-            path = os.path.join(out_dir, fname)
-            generated_name = fname
-            exported_at_raw = ""
-            exported_at_display = ""
-            account_count = 0
-            account_names = ""
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if not isinstance(data, dict):
-                    continue
-
-                accounts = data.get("accounts") or []
-                if not isinstance(accounts, list):
-                    continue
-
-                generated_name = str(data.get("generated_file_name") or fname)
-                exported_at_raw = str(data.get("exported_at", ""))
-
-                # 将 ISO 格式 2026-03-06T16:14:41Z 转成 2026-03-06 16:14:41
-                if exported_at_raw:
-                    try:
-                        iso_text = exported_at_raw.strip()
-                        if iso_text.endswith("Z"):
-                            iso_text = iso_text[:-1] + "+00:00"
-                        dt = datetime.fromisoformat(iso_text)
-                        if dt.tzinfo is not None:
-                            dt = dt.astimezone()
-                        exported_at_display = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        exported_at_display = (
-                            exported_at_raw.replace("T", " ").replace("Z", "")
-                        )
-
-                account_names_list = [
-                    str((item or {}).get("name") or "")
-                    for item in accounts
-                    if isinstance(item, dict)
-                ]
-                account_names_list = [x for x in account_names_list if x]
-                account_names = ", ".join(account_names_list)
-                account_count = int(data.get("account_count") or len(account_names_list))
-            except Exception:
-                exported_at_display = exported_at_raw or ""
-                account_count = 0
-                account_names = ""
-
-            self.tree_accounts.insert(
-                "",
-                tk.END,
-                iid=fname,
-                values=(generated_name, exported_at_display, account_count, account_names),
-            )
-
-    def on_account_select(self, event=None) -> None:
-        sel = self.tree_accounts.selection()
-        if not sel:
-            self.var_selected_file.set("")
-            self._set_json_preview_text("")
-            return
-        fname = sel[0]
-        path = os.path.join(self.get_output_dir(), fname)
-        self.var_selected_file.set(f"当前选择：{path}")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            text = json.dumps(data, ensure_ascii=False, indent=2)
-        except Exception as e:
-            text = f"读取文件失败：{e}"
-        self._set_json_preview_text(text)
-
-    def _set_json_preview_text(self, text: str) -> None:
-        self.txt_json_preview.configure(state=tk.NORMAL)
-        self.txt_json_preview.delete("1.0", tk.END)
-        if text:
-            self.txt_json_preview.insert(tk.END, text)
-        self.txt_json_preview.configure(state=tk.DISABLED)
-
-    def delete_selected_account(self) -> None:
-        sel = self.tree_accounts.selection()
-        if not sel:
-            messagebox.showinfo("提示", "请先在左侧列表中选择一个 JSON 文件。")
-            return
-        fname = sel[0]
-        path = os.path.join(self.get_output_dir(), fname)
-        if not os.path.exists(path):
-            self.tree_accounts.delete(fname)
-            self.var_selected_file.set("")
-            self._set_json_preview_text("")
-            return
-
-        if not messagebox.askyesno("确认删除", f"确定要删除文件？\n\n{path}"):
-            return
-        try:
-            os.remove(path)
-        except Exception as e:
-            messagebox.showwarning("删除失败", f"无法删除文件：{e}")
-            return
-        self.refresh_accounts()
-        self.var_selected_file.set("")
-        self._set_json_preview_text("")
-
-    def open_output_dir(self) -> None:
-        try:
-            os.startfile(self.get_output_dir())
-        except Exception as e:
-            messagebox.showwarning("打开目录失败", f"无法打开输出目录：{e}")
-
-    def open_selected_file_external(self) -> None:
-        sel = self.tree_accounts.selection()
-        if not sel:
-            messagebox.showinfo("提示", "请先在左侧列表中选择一个 JSON 文件。")
-            return
-        fname = sel[0]
-        path = os.path.join(self.get_output_dir(), fname)
-        if not os.path.exists(path):
-            messagebox.showwarning("文件不存在", f"找不到文件：\n{path}")
-            return
-        try:
-            os.startfile(path)
-        except Exception as e:
-            messagebox.showwarning("打开失败", f"无法打开文件：{e}")
-
-    # ================= 注册线程（多线程） =================
-    def start_worker(self) -> None:
-        with self.running_lock:
-            if self.is_running:
-                return
-            # 基本校验
-            try:
-                sleep_min = max(1, int(self.var_sleep_min.get() or 5))
-            except Exception:
-                sleep_min = 5
-            try:
-                sleep_max = max(sleep_min, int(self.var_sleep_max.get() or sleep_min))
-            except Exception:
-                sleep_max = sleep_min
-            try:
-                thread_count = max(
-                    1, min(32, int(self.var_thread_count.get() or 3))
-                )
-            except Exception:
-                thread_count = 3
-            try:
-                process_count = max(
-                    1, min(16, int(self.var_process_count.get() or 1))
-                )
-            except Exception:
-                process_count = 1
-
-            output_dir = self.get_output_dir()
-            os.makedirs(output_dir, exist_ok=True)
-
-            cfg_proxy = str(self.config.get("proxy") or "").strip()
-            proxy = cfg_proxy or None
-
-            self.config.update(
-                {
-                    "sleep_min": sleep_min,
-                    "sleep_max": sleep_max,
-                    "thread_count": thread_count,
-                    "process_count": process_count,
-                    "output_dir": output_dir,
-                }
-            )
-            save_config(self.config)
-
-            self._start_multi_process(
-                process_count,
-                thread_count,
-                proxy,
-                sleep_min,
-                sleep_max,
-                output_dir,
-            )
-
-    def _start_multi_process(
-        self,
-        process_count: int,
-        accounts_per_file: int,
-        proxy: str | None,
-        sleep_min: int,
-        sleep_max: int,
-        output_dir: str,
-    ) -> None:
-        ctx = mp.get_context("spawn")
-        self.stop_event.clear()
-        self.is_running = True
-        self.mp_mode = True
-        self.mp_done_count = 0
-        self.mp_processes = []
-        self.mp_stop_event = ctx.Event()
-        self.mp_log_queue = ctx.Queue()
-
-        self.btn_start.configure(state=tk.DISABLED)
-        self.btn_stop.configure(state=tk.NORMAL)
-        total_accounts = process_count * accounts_per_file
-        self.var_status.set(
-            f"状态：生成中（目标 {process_count} 个文件，每个 {accounts_per_file} 个账号，共 {total_accounts} 个账号）..."
-        )
-
-        for i in range(process_count):
-            p = ctx.Process(
-                target=mp_process_worker,
-                args=(
-                    i + 1,
-                    accounts_per_file,
-                    proxy,
-                    sleep_min,
-                    sleep_max,
-                    output_dir,
-                    self.mp_stop_event,
-                    self.mp_log_queue,
-                ),
-                daemon=True,
-            )
-            self.mp_processes.append(p)
-            p.start()
-
-        self.root.after(120, self._poll_mp_logs)
-        self.root.after(400, self._check_mp_workers)
-
-    def _poll_mp_logs(self) -> None:
-        if not self.is_running or not self.mp_mode or self.mp_log_queue is None:
-            return
-        self._drain_mp_log_queue()
-        self.root.after(120, self._poll_mp_logs)
-
-    def _drain_mp_log_queue(self) -> None:
-        if self.mp_log_queue is None:
-            return
-        try:
-            while True:
-                item = self.mp_log_queue.get_nowait()
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "log":
-                    msg = str(item.get("text") or "")
-                    if msg:
-                        self.append_log(msg)
-                elif item.get("type") == "exported":
-                    out_path = str(item.get("path") or "")
-                    count = int(item.get("count") or 0)
-                    self.append_log(f"[*] 文件导出成功：{out_path}（账号 {count} 个）\n")
-                    self.refresh_accounts()
-                elif item.get("type") == "done":
-                    self.mp_done_count += 1
-                    success_count = int(item.get("success_count") or 0)
-                    target_count = int(item.get("target_count") or 0)
-                    pid = int(item.get("process_id") or 0)
-                    self.append_log(
-                        f"[Info] 进程{pid} 完成：账号 {success_count}/{target_count}\n"
-                    )
-        except queue.Empty:
             pass
+    if not cfg.get("worker_domain"):
+        env = _parse_env()
+        cfg["worker_domain"] = env.get("WORKER_DOMAIN", "")
+        cfg["freemail_username"] = env.get("FREEMAIL_USERNAME", "")
+        cfg["freemail_password"] = env.get("FREEMAIL_PASSWORD", "")
+        ssl_v = env.get("OPENAI_SSL_VERIFY", "1").strip().lower()
+        cfg["openai_ssl_verify"] = ssl_v not in ("0", "false", "no")
+        skip_v = env.get("SKIP_NET_CHECK", "0").strip().lower()
+        cfg["skip_net_check"] = skip_v in ("1", "true", "yes")
+        save_config(cfg)
+    return cfg
 
-    def _check_mp_workers(self) -> None:
-        if not self.is_running or not self.mp_mode:
-            return
-        alive = any(p.is_alive() for p in self.mp_processes)
-        if alive:
-            self.root.after(400, self._check_mp_workers)
-            return
 
-        self._drain_mp_log_queue()
-        self._cleanup_mp_workers()
-        self._on_worker_stopped()
+def save_config(cfg: dict[str, Any]) -> None:
+    """保存完整配置到 gui_config.json。"""
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-    def _cleanup_mp_workers(self) -> None:
-        for p in self.mp_processes:
+
+def _merge_http_headers(extra: dict[str, Any] | None) -> dict[str, str]:
+    """先铺浏览器类头，再由 extra 覆盖（保留 Authorization、Content-Type 等）。"""
+    h: dict[str, str] = dict(_HTTP_BROWSER_HEADERS)
+    if extra:
+        for k, v in extra.items():
+            if v is not None:
+                h[str(k)] = str(v)
+    return h
+
+
+def _urlopen_request(
+    req: urllib.request.Request,
+    *,
+    verify_ssl: bool,
+    timeout: int,
+    proxy: str | None = None,
+):
+    """发起请求：可选走 HTTP(S) 代理（与 r_with_pwd 一致），可选关闭 SSL 校验。"""
+    p = (proxy or "").strip()
+    if not p and verify_ssl:
+        return urllib.request.urlopen(req, timeout=timeout)
+    handlers: list[Any] = []
+    if p:
+        handlers.append(urllib.request.ProxyHandler({"http": p, "https": p}))
+    if not verify_ssl:
+        ctx = ssl._create_unverified_context()
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+    return opener.open(req, timeout=timeout)
+
+
+def _http_post_json(
+    url: str,
+    body: bytes,
+    headers: dict[str, Any],
+    *,
+    verify_ssl: bool,
+    timeout: int = 120,
+    proxy: str | None = None,
+) -> tuple[int, str]:
+    """POST JSON，返回 (HTTP 状态码, 响应体文本)。"""
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers=_merge_http_headers(headers),
+    )
+    try:
+        with _urlopen_request(
+            req,
+            verify_ssl=verify_ssl,
+            timeout=timeout,
+            proxy=proxy,
+        ) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        return e.code, raw
+    except Exception as e:
+        return -1, str(e)
+
+
+def _http_get(
+    url: str,
+    headers: dict[str, Any],
+    *,
+    verify_ssl: bool,
+    timeout: int = 60,
+    proxy: str | None = None,
+) -> tuple[int, str]:
+    """GET，返回 (HTTP 状态码, 响应体文本)。"""
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers=_merge_http_headers(headers),
+    )
+    try:
+        with _urlopen_request(
+            req,
+            verify_ssl=verify_ssl,
+            timeout=timeout,
+            proxy=proxy,
+        ) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        return e.code, raw
+    except Exception as e:
+        return -1, str(e)
+
+
+def _hint_connect_error(msg: str) -> str:
+    """为常见连接失败补充简短排查提示。"""
+    if not msg:
+        return msg
+    low = msg.lower()
+    if (
+        "10061" in msg
+        or "拒绝" in msg
+        or "connection refused" in low
+        or "timed out" in low
+        or "超时" in msg
+    ):
+        return (
+            f"{msg}\n\n"
+            "排查：1) 服务地址/端口是否正确、服务是否在运行；2) 防火墙是否拦截；"
+            "3) 若访问该 API 需翻墙，请在「工作台」填写与注册相同的 HTTP 代理（如 http://127.0.0.1:7890）。"
+        )
+    if "1010" in msg or "browser_signature" in low or "access denied" in low:
+        return (
+            f"{msg}\n\n"
+            "若页面为 Cloudflare：多为请求指纹被拦。本程序已为 API 请求附带桌面 Chrome 风格 UA；"
+            "若仍 403，需在服务端放宽规则或使用与浏览器一致的代理出口。"
+        )
+    return msg
+
+
+class StdoutCapture:
+    """按行把 print 输出交给回调，供后台线程日志上屏。"""
+
+    def __init__(self, cb):
+        self._cb = cb
+        self._buf = ""
+
+    def write(self, text: str) -> None:
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line:
+                self._cb(line)
+
+    def flush(self) -> None:
+        if self._buf:
+            self._cb(self._buf)
+            self._buf = ""
+
+
+class RegisterService:
+    """应用业务层：配置、运行控制、数据管理、日志缓存。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.cfg: dict[str, Any] = load_config()
+        self._running = False
+        self._status_text = "就绪"
+        self._progress = 0.0
+        self._stop = threading.Event()
+        self._worker_thread: threading.Thread | None = None
+
+        self._logs: deque[dict[str, Any]] = deque(maxlen=5000)
+        self._log_seq = 0
+
+        self._sync_busy = False
+        self._remote_busy = False
+        self._remote_rows: list[dict[str, Any]] = []
+        self._remote_total = 0
+        self._remote_pages = 1
+        self._remote_email_counts: dict[str, int] = {}
+        self._remote_sync_status_ready = False
+
+        self._apply_to_env()
+        self.log("Web 控制台已就绪")
+
+    @staticmethod
+    def _to_int(v: Any, default: int, lo: int = 1, hi: int | None = None) -> int:
+        try:
+            out = int(v)
+        except (TypeError, ValueError):
+            out = default
+        out = max(lo, out)
+        if hi is not None:
+            out = min(hi, out)
+        return out
+
+    @staticmethod
+    def _to_bool(v: Any, default: bool) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            sv = v.strip().lower()
+            if sv in {"1", "true", "yes", "on"}:
+                return True
+            if sv in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    def log(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        with self._lock:
+            self._log_seq += 1
+            line = f"[{ts}] {msg}"
+            self._logs.append(
+                {
+                    "id": self._log_seq,
+                    "ts": ts,
+                    "msg": str(msg),
+                    "line": line,
+                }
+            )
+
+    def clear_logs(self) -> None:
+        with self._lock:
+            self._logs.clear()
+            self._log_seq = 0
+        self.log("日志已清空")
+
+    def fetch_logs(self, since: int) -> dict[str, Any]:
+        with self._lock:
+            items = [x for x in self._logs if int(x.get("id", 0)) > since]
+            last = self._log_seq
+        return {"items": items, "last_id": last}
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self._running,
+                "status_text": self._status_text,
+                "progress": self._progress,
+                "sync_busy": self._sync_busy,
+                "remote_busy": self._remote_busy,
+            }
+
+    def get_config(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self.cfg)
+
+    def update_config(self, data: dict[str, Any], emit_log: bool = True) -> dict[str, Any]:
+        with self._lock:
+            cfg = dict(self.cfg)
+
+        if not isinstance(data, dict):
+            data = {}
+
+        if "num_accounts" in data:
+            cfg["num_accounts"] = self._to_int(data.get("num_accounts"), cfg.get("num_accounts", 1), 1)
+        if "sleep_min" in data:
+            cfg["sleep_min"] = self._to_int(data.get("sleep_min"), cfg.get("sleep_min", 5), 1)
+        if "sleep_max" in data:
+            cfg["sleep_max"] = self._to_int(data.get("sleep_max"), cfg.get("sleep_max", 30), 1)
+
+        if cfg["sleep_max"] < cfg["sleep_min"]:
+            cfg["sleep_max"] = cfg["sleep_min"]
+
+        str_keys = [
+            "proxy",
+            "worker_domain",
+            "freemail_username",
+            "freemail_password",
+            "accounts_sync_api_url",
+            "accounts_sync_bearer_token",
+            "accounts_list_api_base",
+            "accounts_list_timezone",
+        ]
+        for key in str_keys:
+            if key in data:
+                cfg[key] = str(data.get(key) or "").strip()
+
+        if "openai_ssl_verify" in data:
+            cfg["openai_ssl_verify"] = self._to_bool(
+                data.get("openai_ssl_verify"),
+                bool(cfg.get("openai_ssl_verify", True)),
+            )
+        if "skip_net_check" in data:
+            cfg["skip_net_check"] = self._to_bool(
+                data.get("skip_net_check"),
+                bool(cfg.get("skip_net_check", False)),
+            )
+
+        cfg["accounts_list_page_size"] = 10
+
+        with self._lock:
+            self.cfg = cfg
+            save_config(self.cfg)
+            self._apply_to_env()
+
+        if emit_log:
+            self.log("配置已保存到 gui_config.json")
+        return self.get_config()
+
+    def _set_status(self, text: str) -> None:
+        with self._lock:
+            self._status_text = text
+
+    def _set_progress(self, val: float) -> None:
+        with self._lock:
+            self._progress = max(0.0, min(1.0, float(val)))
+
+    def _set_running(self, running: bool) -> None:
+        with self._lock:
+            self._running = running
+
+    def _apply_to_env(self) -> None:
+        domain = str(self.cfg.get("worker_domain") or "").strip()
+        if domain and not domain.startswith("http"):
+            domain = f"https://{domain}"
+        os.environ["WORKER_DOMAIN"] = domain.rstrip("/")
+        os.environ["FREEMAIL_USERNAME"] = str(self.cfg.get("freemail_username") or "")
+        os.environ["FREEMAIL_PASSWORD"] = str(self.cfg.get("freemail_password") or "")
+        os.environ["OPENAI_SSL_VERIFY"] = "1" if self.cfg.get("openai_ssl_verify") else "0"
+        os.environ["SKIP_NET_CHECK"] = "1" if self.cfg.get("skip_net_check") else "0"
+
+    def start(self, run_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            if self._running:
+                raise RuntimeError("任务正在运行中")
+        if run_cfg:
+            self.update_config(run_cfg, emit_log=False)
+        self._apply_to_env()
+        self._stop.clear()
+        self._set_running(True)
+        self._set_status("运行中")
+        self._set_progress(0)
+        self.log("开始注册任务")
+        self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+        self._worker_thread.start()
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            if not self._running:
+                return self.status()
+        self._stop.set()
+        self._set_status("停止中")
+        self.log("正在停止...")
+        return self.status()
+
+    def _worker(self) -> None:
+        """后台注册循环：劫持 stdout 以收集 r_with_pwd 日志，结束后恢复。"""
+        old_out, old_err = sys.stdout, sys.stderr
+        cap = StdoutCapture(self.log)
+        sys.stdout = cap
+        sys.stderr = cap
+
+        try:
+            import r_with_pwd
+
+            domain = str(self.cfg.get("worker_domain") or "").strip()
+            if domain and not domain.startswith("http"):
+                domain = f"https://{domain}"
+            r_with_pwd.WORKER_DOMAIN = domain.rstrip("/")
+            r_with_pwd.FREEMAIL_USERNAME = str(self.cfg.get("freemail_username") or "")
+            r_with_pwd.FREEMAIL_PASSWORD = str(self.cfg.get("freemail_password") or "")
+            r_with_pwd._freemail_session_cookie_reset()
+
+            fp = str(self.cfg.get("freemail_password") or "")
+            fp_mask = (fp[:3] + "***") if len(fp) >= 3 else ("***" if fp else "")
+            self.log(
+                f"配置 -> domain={r_with_pwd.WORKER_DOMAIN}, "
+                f"user={r_with_pwd.FREEMAIL_USERNAME}, pass={fp_mask}"
+            )
+
+            num = self._to_int(self.cfg.get("num_accounts"), 1, 1)
+            smin = self._to_int(self.cfg.get("sleep_min"), 5, 1)
+            smax = self._to_int(self.cfg.get("sleep_max"), 30, smin)
+            if smax < smin:
+                smax = smin
+            proxy = str(self.cfg.get("proxy") or "").strip() or None
+            outdir = os.getenv("TOKEN_OUTPUT_DIR", "").strip()
+
+            acc_file = r_with_pwd._init_accounts_file(outdir)
+            self.log(f"Accounts: {acc_file}")
+
+            ok = 0
+            for i in range(1, num + 1):
+                if self._stop.is_set():
+                    break
+
+                self._set_status(f"注册中 {i}/{num}")
+                self._set_progress((i - 1) / num)
+                self.log(f">>> 第 {i}/{num} 次注册 <<<")
+
+                try:
+                    result = r_with_pwd.run(proxy)
+                    if not isinstance(result, (tuple, list)):
+                        self.log("返回异常，跳过")
+                        continue
+
+                    acct = result[0]
+                    pwd = result[1] if len(result) > 1 else ""
+
+                    if acct == "retry_403":
+                        self.log("403，10 秒后重试...")
+                        for _ in range(10):
+                            if self._stop.is_set():
+                                break
+                            time.sleep(1)
+                        continue
+
+                    if acct and isinstance(acct, dict):
+                        email = str(acct.get("name") or "")
+                        r_with_pwd._append_account_to_file(acct)
+                        ok += 1
+                        self.log(f"成功 ({ok}): {email}")
+
+                        if email and pwd:
+                            pf = os.path.join(outdir, ACCOUNTS_TXT) if outdir else ACCOUNTS_TXT
+                            with open(pf, "a", encoding="utf-8") as af:
+                                af.write(f"{email}----{pwd}\n")
+                    else:
+                        self.log("本次失败")
+                except Exception as e:
+                    self.log(f"异常: {e}")
+
+                self._set_progress(i / num)
+
+                if i < num and not self._stop.is_set():
+                    w = random.randint(smin, smax)
+                    self.log(f"冷却 {w} 秒...")
+                    for _ in range(w):
+                        if self._stop.is_set():
+                            break
+                        time.sleep(1)
+
+            tag = "已停止" if self._stop.is_set() else f"完成 (成功 {ok}/{num})"
+            self.log(tag)
+        except Exception as e:
+            self.log(f"运行异常: {e}")
+        finally:
+            cap.flush()
+            sys.stdout = old_out
+            sys.stderr = old_err
+            self._set_running(False)
+            self._set_status("就绪")
+            self._set_progress(0)
+
+    def _accounts_txt_path(self) -> str:
+        """与 r_with_pwd 写入逻辑一致：有 TOKEN_OUTPUT_DIR 则用其下 accounts.txt。"""
+        outdir = os.getenv("TOKEN_OUTPUT_DIR", "").strip()
+        if outdir:
+            return os.path.join(outdir, ACCOUNTS_TXT)
+        return ACCOUNTS_TXT
+
+    @staticmethod
+    def _emails_from_accounts_json(fp: str) -> set[str]:
+        """从导出 JSON 的 accounts 数组收集邮箱，用于删文件时同步 accounts.txt。"""
+        emails: set[str] = set()
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for acc in data.get("accounts", []):
+                if not isinstance(acc, dict):
+                    continue
+                e = (
+                    acc.get("name")
+                    or (acc.get("credentials") or {}).get("email")
+                    or (acc.get("extra") or {}).get("email")
+                )
+                if e and isinstance(e, str):
+                    emails.add(e.strip())
+        except Exception:
+            pass
+        return emails
+
+    @staticmethod
+    def _email_from_account_entry(acc: dict[str, Any]) -> str:
+        if not isinstance(acc, dict):
+            return ""
+        e = str(acc.get("name") or "").strip().lower()
+        if e:
+            return e
+        creds = acc.get("credentials") or {}
+        if isinstance(creds, dict):
+            return str(creds.get("email") or "").strip().lower()
+        return ""
+
+    def _build_local_account_index(self) -> dict[str, dict[str, Any]]:
+        """从本地 accounts_*.json 建立 email -> account 字典（新文件优先）。"""
+        out: dict[str, dict[str, Any]] = {}
+        files = sorted(glob.glob("accounts_*.json"), key=os.path.getmtime, reverse=True)
+        for fp in files:
             try:
-                if p.is_alive():
-                    p.join(timeout=0.1)
+                with open(fp, "r", encoding="utf-8") as f:
+                    root = json.load(f)
+                arr = root.get("accounts", [])
+                if not isinstance(arr, list):
+                    continue
+                for acc in arr:
+                    em = self._email_from_account_entry(acc)
+                    if em and em not in out and isinstance(acc, dict):
+                        out[em] = acc
             except Exception:
-                pass
-        self.mp_processes = []
-        self.mp_stop_event = None
-        self.mp_log_queue = None
-        self.mp_done_count = 0
-        self.mp_mode = False
-        with self.running_lock:
-            self.is_running = False
+                continue
+        return out
 
-    def stop_worker(self) -> None:
-        with self.running_lock:
-            if not self.is_running:
-                return
-            self.stop_event.set()
-            if self.mp_mode and self.mp_stop_event is not None:
-                self.mp_stop_event.set()
-        self.append_log("收到停止指令，正在安全退出当前循环...\n")
-
-    def _on_worker_stopped(self) -> None:
-        self.btn_start.configure(state=tk.NORMAL)
-        self.btn_stop.configure(state=tk.DISABLED)
-        self.var_status.set("状态：空闲")
-        self.refresh_accounts()
-
-    # ================= 关闭处理 =================
-    def on_close(self) -> None:
-        if self.is_running:
-            if not messagebox.askyesno(
-                "确认退出", "注册线程仍在运行，确定要停止并退出吗？"
-            ):
-                return
-            self.stop_event.set()
-            if self.mp_mode and self.mp_stop_event is not None:
-                self.mp_stop_event.set()
-            for p in self.mp_processes:
-                if p is not None and p.is_alive():
-                    p.join(timeout=5)
-            for t in self.worker_threads:
-                if t is not None and t.is_alive():
-                    t.join(timeout=5)
-
-        if self.log_file:
+    def list_json_files(self) -> dict[str, Any]:
+        files = sorted(
+            glob.glob("accounts_*.json"),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        items: list[dict[str, Any]] = []
+        total = 0
+        for fp in files:
+            fp_abs = os.path.abspath(fp)
             try:
-                self.log_file.close()
+                with open(fp_abs, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                cnt = len(data.get("accounts", []))
+                exported = data.get("exported_at", "-")
             except Exception:
-                pass
-        self.root.destroy()
+                cnt, exported = 0, "-"
+            try:
+                cdate = datetime.fromtimestamp(os.path.getctime(fp_abs)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                cdate = "-"
+            total += cnt
+            items.append(
+                {
+                    "path": fp_abs,
+                    "name": os.path.basename(fp_abs),
+                    "count": cnt,
+                    "created": cdate,
+                    "exported": exported,
+                }
+            )
+        return {"items": items, "file_count": len(items), "account_total": total}
+
+    def list_accounts(self) -> dict[str, Any]:
+        lines: list[str] = []
+        ap = self._accounts_txt_path()
+        if os.path.exists(ap):
+            try:
+                with open(ap, "r", encoding="utf-8") as f:
+                    lines = [l.strip() for l in f if l.strip()]
+            except Exception:
+                lines = []
+
+        local_counts: dict[str, int] = {}
+        for line in lines:
+            ep = line.split("----", 1)[0].strip().lower()
+            if ep:
+                local_counts[ep] = local_counts.get(ep, 0) + 1
+
+        with self._lock:
+            remote_ready = self._remote_sync_status_ready
+            remote_counts = dict(self._remote_email_counts)
+
+        items: list[dict[str, Any]] = []
+        for i, line in enumerate(lines, start=1):
+            parts = line.split("----", 1)
+            email = parts[0]
+            pwd = parts[1] if len(parts) > 1 else ""
+            ep = email.strip().lower()
+            status = "normal"
+            if remote_ready:
+                remote_cnt = int(remote_counts.get(ep, 0))
+                local_cnt = int(local_counts.get(ep, 0))
+                if local_cnt > 1 or remote_cnt > 1:
+                    status = "dup"
+                elif remote_cnt > 0:
+                    status = "ok"
+                else:
+                    status = "pending"
+            items.append(
+                {
+                    "key": f"{i}:{email}",
+                    "index": i,
+                    "email": email,
+                    "password": pwd,
+                    "status": status,
+                }
+            )
+        return {"path": ap, "total": len(items), "items": items}
+
+    def delete_json_files(self, paths: list[str]) -> dict[str, Any]:
+        if not paths:
+            raise ValueError("请先选择要删除的 JSON 文件")
+
+        allow = {os.path.abspath(p) for p in glob.glob("accounts_*.json")}
+        selected = [os.path.abspath(str(p)) for p in paths]
+
+        removed_files = 0
+        removed_lines = 0
+        skipped: list[str] = []
+        all_emails: set[str] = set()
+
+        for fp in selected:
+            if fp not in allow:
+                skipped.append(fp)
+                continue
+            if not os.path.isfile(fp):
+                skipped.append(fp)
+                continue
+            all_emails |= self._emails_from_accounts_json(fp)
+            try:
+                os.remove(fp)
+                removed_files += 1
+            except Exception:
+                skipped.append(fp)
+
+        acct_path = self._accounts_txt_path()
+        if all_emails and os.path.isfile(acct_path):
+            email_lower = {e.lower() for e in all_emails}
+            try:
+                with open(acct_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                kept: list[str] = []
+                for raw in lines:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    ep = line.split("----", 1)[0].strip().lower()
+                    if ep in email_lower:
+                        removed_lines += 1
+                        continue
+                    kept.append(raw if raw.endswith("\n") else raw + "\n")
+                with open(acct_path, "w", encoding="utf-8") as f:
+                    f.writelines(kept)
+            except Exception as e:
+                self.log(f"更新 {acct_path} 失败: {e}")
+
+        self.log(
+            f"已删除 {removed_files} 个 JSON；从账号列表移除 {removed_lines} 行（{acct_path}）"
+        )
+        return {
+            "removed_files": removed_files,
+            "removed_lines": removed_lines,
+            "skipped": skipped,
+        }
+
+    def sync_selected_accounts(self, emails: list[str]) -> dict[str, Any]:
+        selected = [str(e).strip().lower() for e in emails if str(e).strip()]
+        if not selected:
+            raise ValueError("请先勾选要同步的账号")
+
+        with self._lock:
+            if self._sync_busy:
+                raise RuntimeError("同步正在进行中，请稍候")
+            self._sync_busy = True
+
+        ok = 0
+        fail = 0
+        missing: list[str] = []
+        try:
+            url = str(self.cfg.get("accounts_sync_api_url") or "").strip()
+            tok = str(self.cfg.get("accounts_sync_bearer_token") or "").strip()
+            verify_ssl = bool(self.cfg.get("openai_ssl_verify", True))
+            proxy_arg = str(self.cfg.get("proxy") or "").strip() or None
+
+            if not url:
+                raise ValueError("请先填写同步 API 地址")
+            if not tok:
+                raise ValueError("请先填写 Bearer Token")
+
+            auth = tok if tok.lower().startswith("bearer ") else f"Bearer {tok}"
+            emails_uniq = list(dict.fromkeys(selected))
+            local_map = self._build_local_account_index()
+
+            found_accounts: list[dict[str, Any]] = []
+            for em in emails_uniq:
+                acc = local_map.get(em)
+                if not acc:
+                    missing.append(em)
+                    continue
+                found_accounts.append(acc)
+
+            for em in missing:
+                self.log(f"同步跳过 {em}: 本地 JSON 中未找到该账号详情")
+
+            if not found_accounts:
+                fail = len(emails_uniq)
+                raise RuntimeError("本地 JSON 中未找到可同步账号")
+
+            payload = {
+                "data": {"accounts": found_accounts, "proxies": []},
+                "skip_default_group_bind": True,
+            }
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": auth,
+            }
+            code, text = _http_post_json(
+                url,
+                body,
+                headers,
+                verify_ssl=verify_ssl,
+                proxy=proxy_arg,
+            )
+            if 200 <= code < 300:
+                ok = len(found_accounts)
+                fail = len(missing)
+                self.log(f"批量同步成功 HTTP {code}，账号 {ok} 个")
+            else:
+                fail = len(found_accounts) + len(missing)
+                snippet = (text or "")[:500].replace("\n", " ")
+                raise RuntimeError(f"批量同步失败 HTTP {code} {snippet}")
+
+            return {"ok": ok, "fail": fail, "missing": missing}
+        finally:
+            with self._lock:
+                self._sync_busy = False
+            self.log(f"同步结束：成功 {ok}，失败 {fail}")
+
+    @staticmethod
+    def _remote_item_groups_label(it: dict[str, Any]) -> str:
+        gs = it.get("groups")
+        if not isinstance(gs, list) or not gs:
+            return "-"
+        names: list[str] = []
+        for g in gs[:4]:
+            if isinstance(g, dict) and g.get("name"):
+                names.append(str(g["name"]))
+        s = ", ".join(names)
+        if len(gs) > 4:
+            s += "…"
+        return s or "-"
+
+    @staticmethod
+    def _usage_to_percent(v: Any) -> str:
+        try:
+            return f"{float(v):.1f}%"
+        except (TypeError, ValueError):
+            return "--"
+
+    def fetch_remote_all_pages(self, search: str = "") -> dict[str, Any]:
+        with self._lock:
+            if self._remote_busy:
+                raise RuntimeError("服务端列表请求进行中")
+            self._remote_busy = True
+            self._remote_sync_status_ready = False
+            self._remote_rows = []
+            self._remote_total = 0
+            self._remote_pages = 1
+            self._remote_email_counts = {}
+
+        rows: list[dict[str, Any]] = []
+        remote_email_counts: dict[str, int] = {}
+        total = 0
+        pages = 1
+
+        try:
+            tok = str(self.cfg.get("accounts_sync_bearer_token") or "").strip()
+            base = str(self.cfg.get("accounts_list_api_base") or "").strip()
+            if not tok:
+                raise ValueError("请先填写 Bearer Token")
+            if not base:
+                raise ValueError("请先填写账号列表 API")
+
+            psize = 10
+            verify = bool(self.cfg.get("openai_ssl_verify", True))
+            proxy_arg = str(self.cfg.get("proxy") or "").strip() or None
+            tz = str(
+                self.cfg.get(
+                    "accounts_list_timezone",
+                    DEFAULT_CONFIG["accounts_list_timezone"],
+                )
+            )
+            auth = tok if tok.lower().startswith("bearer ") else f"Bearer {tok}"
+            page = 1
+            search_kw = str(search or "").strip()
+            self.log("开始循环拉取列表与额度（每页 10 条）…")
+
+            while True:
+                qs = urllib.parse.urlencode(
+                    {
+                        "page": str(page),
+                        "page_size": str(psize),
+                        "platform": "",
+                        "type": "",
+                        "status": "",
+                        "group": "",
+                        "search": search_kw,
+                        "timezone": tz,
+                    }
+                )
+                url = f"{base.rstrip('/')}?{qs}"
+                code, text = _http_get(
+                    url,
+                    {"Accept": "application/json", "Authorization": auth},
+                    verify_ssl=verify,
+                    timeout=90,
+                    proxy=proxy_arg,
+                )
+                if not (200 <= code < 300):
+                    raise RuntimeError(f"HTTP {code}: {(text or '')[:400]}")
+
+                try:
+                    j = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"JSON 解析失败: {e}") from e
+
+                if j.get("code") != 0:
+                    raise RuntimeError(str(j.get("message") or "接口返回非成功"))
+
+                data = j.get("data") or {}
+                items = data.get("items") or []
+                if not isinstance(items, list):
+                    items = []
+                total = int(data.get("total") or total or 0)
+                pages = max(1, int(data.get("pages") or pages))
+                page = int(data.get("page") or page)
+                self.log(f"列表第 {page}/{pages} 页：{len(items)} 条")
+
+                for idx, it in enumerate(items):
+                    if not isinstance(it, dict):
+                        continue
+                    aid = str(it.get("id") or "")
+                    name = str(it.get("name") or "")
+                    plat = str(it.get("platform") or "")
+                    typ = str(it.get("type") or "")
+                    st = str(it.get("status") or "")
+                    gl = self._remote_item_groups_label(it)
+
+                    u5, u7 = "--", "--"
+                    if aid.isdigit():
+                        uurl = f"{base.rstrip('/')}/{aid}/usage?{urllib.parse.urlencode({'timezone': tz})}"
+                        uc, ut = _http_get(
+                            uurl,
+                            {"Accept": "application/json", "Authorization": auth},
+                            verify_ssl=verify,
+                            timeout=30,
+                            proxy=proxy_arg,
+                        )
+                        if 200 <= uc < 300:
+                            try:
+                                uj = json.loads(ut)
+                            except Exception:
+                                uj = {}
+                            if uj.get("code") == 0:
+                                ud = uj.get("data") or {}
+                                u5 = self._usage_to_percent(
+                                    (ud.get("five_hour") or {}).get("utilization")
+                                )
+                                u7 = self._usage_to_percent(
+                                    (ud.get("seven_day") or {}).get("utilization")
+                                )
+
+                    rows.append(
+                        {
+                            "key": f"{aid}-{page}-{idx}",
+                            "id": aid,
+                            "name": name,
+                            "platform": plat,
+                            "type": typ,
+                            "status": st,
+                            "groups": gl,
+                            "u5h": u5,
+                            "u7d": u7,
+                        }
+                    )
+                    nm = name.strip().lower()
+                    if nm:
+                        remote_email_counts[nm] = remote_email_counts.get(nm, 0) + 1
+
+                with self._lock:
+                    self._remote_rows = list(rows)
+                    self._remote_total = total
+                    self._remote_pages = pages
+                    self._remote_email_counts = dict(remote_email_counts)
+
+                if page >= pages:
+                    break
+                page += 1
+
+            with self._lock:
+                self._remote_rows = rows
+                self._remote_total = total
+                self._remote_pages = pages
+                self._remote_email_counts = remote_email_counts
+                self._remote_sync_status_ready = True
+
+            self.log(f"循环拉取完成：{pages} 页，{total} 条，额度已同步")
+            return {
+                "items": rows,
+                "total": total,
+                "pages": pages,
+                "loaded": len(rows),
+            }
+        except Exception as e:
+            self.log(f"循环拉取失败: {e}")
+            raise RuntimeError(_hint_connect_error(str(e))) from e
+        finally:
+            with self._lock:
+                self._remote_busy = False
+
+    def remote_cache(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "items": list(self._remote_rows),
+                "total": self._remote_total,
+                "pages": self._remote_pages,
+                "loaded": len(self._remote_rows),
+                "ready": self._remote_sync_status_ready,
+            }
 
 
-def main():
-    root = tk.Tk()
-    app = RegistrarGUI(root)
-    root.mainloop()
+INDEX_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CodeX Register · Web UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-0: #070b12;
+      --bg-1: #0d1420;
+      --bg-2: #111a29;
+      --line: #223247;
+      --card: rgba(17, 26, 39, 0.88);
+      --card-soft: rgba(13, 21, 33, 0.88);
+      --text: #d9e3ef;
+      --muted: #8ea3bb;
+      --accent: #3ea6ff;
+      --accent-2: #38c8aa;
+      --danger: #f46b78;
+      --warn: #f7b267;
+      --shadow: rgba(0, 0, 0, 0.42);
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body,
+    #app {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      color: var(--text);
+      font-family: "Space Grotesk", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 14% 12%, rgba(56, 200, 170, 0.15), transparent 32%),
+        radial-gradient(circle at 88% 18%, rgba(62, 166, 255, 0.16), transparent 28%),
+        linear-gradient(160deg, var(--bg-0), var(--bg-1) 52%, var(--bg-2));
+    }
+
+    body {
+      overflow: hidden;
+    }
+
+    .page-wrap {
+      height: 100vh;
+      padding: 10px;
+    }
+
+    .main-layout {
+      height: calc(100vh - 20px);
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: rgba(12, 18, 28, 0.9);
+      box-shadow: 0 16px 44px var(--shadow);
+    }
+
+    .sider {
+      background: linear-gradient(180deg, #111a29, #0c1320 72%, #0a111b);
+      border-right: 1px solid var(--line);
+    }
+
+    .brand {
+      padding: 20px 18px 14px;
+      border-bottom: 1px solid rgba(142, 163, 187, 0.2);
+      color: #e8eef7;
+    }
+
+    .brand h2 {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: 0.6px;
+      font-weight: 700;
+    }
+
+    .brand p {
+      margin: 8px 0 0;
+      font-size: 12px;
+      color: rgba(189, 205, 222, 0.82);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      background: rgba(9, 15, 24, 0.84);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(8px);
+    }
+
+    .header-title h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+      letter-spacing: 0.3px;
+      color: #eef5ff;
+    }
+
+    .header-title p {
+      margin: 6px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.2px;
+    }
+
+    .header-status {
+      width: min(450px, 58vw);
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .progress-wrap {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .content {
+      height: calc(100vh - 106px);
+      padding: 12px;
+      overflow: hidden;
+    }
+
+    .tab-page {
+      height: 100%;
+      min-height: 0;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      padding-right: 2px;
+    }
+
+    .log-page {
+      min-height: 100%;
+      align-content: stretch;
+    }
+
+    .glass-card {
+      border: 1px solid rgba(86, 107, 132, 0.38);
+      background: var(--card);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    }
+
+    .dash-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .dash-actions {
+      margin-top: 8px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .split-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    @media (min-width: 1680px) {
+      .split-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .meta {
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .log-card {
+      border: 1px solid rgba(86, 107, 132, 0.5);
+      background: var(--card-soft);
+    }
+
+    .log-scroll {
+      height: calc(100vh - 220px);
+      min-height: 520px;
+    }
+
+    .log-view {
+      margin: 0;
+      font-family: "Cascadia Mono", "Consolas", monospace;
+      font-size: 13px;
+      line-height: 1.56;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d4e2f2;
+      padding: 6px 4px 14px;
+    }
+
+    .content::-webkit-scrollbar,
+    .tab-page::-webkit-scrollbar,
+    .log-scroll .n-scrollbar-container::-webkit-scrollbar,
+    body::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    .content::-webkit-scrollbar-thumb,
+    .tab-page::-webkit-scrollbar-thumb,
+    .log-scroll .n-scrollbar-container::-webkit-scrollbar-thumb,
+    body::-webkit-scrollbar-thumb {
+      background: rgba(91, 114, 142, 0.56);
+      border-radius: 9px;
+      border: 2px solid rgba(7, 11, 18, 0.8);
+    }
+
+    .content::-webkit-scrollbar-track,
+    .tab-page::-webkit-scrollbar-track,
+    .log-scroll .n-scrollbar-container::-webkit-scrollbar-track,
+    body::-webkit-scrollbar-track {
+      background: rgba(13, 20, 32, 0.4);
+    }
+
+    @media (max-width: 1120px) {
+      .dash-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .header-status {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 860px) {
+      body {
+        overflow: auto;
+      }
+
+      .page-wrap {
+        padding: 0;
+        height: auto;
+      }
+
+      .main-layout {
+        border-radius: 0;
+        height: auto;
+        min-height: 100vh;
+      }
+
+      .content {
+        height: auto;
+        padding: 10px;
+        overflow: visible;
+      }
+
+      .tab-page {
+        overflow: visible;
+      }
+
+      .log-scroll {
+        height: 420px;
+        min-height: 420px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#b8c9dc;letter-spacing:.2px;">正在加载界面...</div>
+  </div>
+
+  <script>
+    (function () {
+      var appEl = document.getElementById("app");
+      function renderFail(title, detail) {
+        if (!appEl) return;
+        appEl.innerHTML = "";
+
+        var wrap = document.createElement("div");
+        wrap.style.minHeight = "100vh";
+        wrap.style.display = "flex";
+        wrap.style.alignItems = "center";
+        wrap.style.justifyContent = "center";
+        wrap.style.padding = "24px";
+
+        var card = document.createElement("div");
+        card.style.maxWidth = "760px";
+        card.style.width = "100%";
+        card.style.background = "rgba(15,24,37,.94)";
+        card.style.border = "1px solid #2a3a51";
+        card.style.borderRadius = "14px";
+        card.style.padding = "16px 18px";
+        card.style.color = "#dbe7f5";
+        card.style.boxShadow = "0 10px 30px rgba(0,0,0,.34)";
+
+        var t = document.createElement("h3");
+        t.textContent = title;
+        t.style.margin = "0 0 8px";
+
+        var p = document.createElement("p");
+        p.textContent = detail;
+        p.style.margin = "0";
+        p.style.whiteSpace = "pre-wrap";
+        p.style.lineHeight = "1.6";
+
+        var tip = document.createElement("p");
+        tip.textContent = "建议：1) 安装 Microsoft Edge WebView2 Runtime；2) 确认可访问 unpkg CDN；3) 也可用 --mode browser 先验证。";
+        tip.style.margin = "10px 0 0";
+        tip.style.fontSize = "12px";
+        tip.style.color = "#8ea3bb";
+
+        card.appendChild(t);
+        card.appendChild(p);
+        card.appendChild(tip);
+        wrap.appendChild(card);
+        appEl.appendChild(wrap);
+      }
+
+      window.__codexMounted = false;
+      window.__codexRenderFail = renderFail;
+
+      window.addEventListener("error", function (event) {
+        if (window.__codexMounted) return;
+        var msg = (event && event.message) ? event.message : "脚本运行异常";
+        renderFail("页面加载失败", msg);
+      });
+
+      setTimeout(function () {
+        if (window.__codexMounted) return;
+        if (!window.Proxy) {
+          renderFail("当前内核不支持", "检测到旧版 WebView 内核。请安装 Microsoft Edge WebView2 Runtime 后重试。");
+          return;
+        }
+        if (!window.Vue || !window.naive) {
+          renderFail("资源加载失败", "未能加载 Vue / Naive UI 资源，请检查网络代理或防火墙设置。\n若在公司网络，请先测试 --mode browser。");
+        }
+      }, 3200);
+    })();
+  </script>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/naive-ui"></script>
+  <script>
+    (function () {
+    const Vue = window.Vue;
+    const naive = window.naive;
+    if (!Vue || !naive) {
+      if (window.__codexRenderFail) {
+        window.__codexRenderFail("资源加载失败", "未能加载 Vue / Naive UI 资源，请检查网络后重试。");
+      }
+      return;
+    }
+
+    const {
+      darkTheme,
+      NConfigProvider,
+      NLayout,
+      NLayoutSider,
+      NLayoutHeader,
+      NLayoutContent,
+      NMenu,
+      NCard,
+      NButton,
+      NForm,
+      NFormItem,
+      NInput,
+      NInputNumber,
+      NSwitch,
+      NSpace,
+      NTag,
+      NProgress,
+      NAlert,
+      NDataTable,
+      NScrollbar
+    } = naive;
+
+    const { message } = naive.createDiscreteApi(["message"]);
+
+    const App = {
+      components: {
+        NConfigProvider,
+        NLayout,
+        NLayoutSider,
+        NLayoutHeader,
+        NLayoutContent,
+        NMenu,
+        NCard,
+        NButton,
+        NForm,
+        NFormItem,
+        NInput,
+        NInputNumber,
+        NSwitch,
+        NSpace,
+        NTag,
+        NProgress,
+        NAlert,
+        NDataTable,
+        NScrollbar
+      },
+      setup() {
+        const activeTab = Vue.ref("dash");
+        const menuOptions = [
+          { label: "工作台", key: "dash" },
+          { label: "数据", key: "data" },
+          { label: "服务设置", key: "settings" },
+          { label: "运行日志", key: "logs" }
+        ];
+
+        const themeOverrides = {
+          common: {
+            fontFamily: "Space Grotesk, PingFang SC, Microsoft YaHei, sans-serif",
+            primaryColor: "#3ea6ff",
+            primaryColorHover: "#74beff",
+            primaryColorPressed: "#2f8bdb",
+            infoColor: "#48b5ff",
+            successColor: "#45d4af",
+            warningColor: "#f7b267",
+            errorColor: "#f46b78",
+            bodyColor: "#0b1017",
+            cardColor: "#111a29",
+            modalColor: "#111a29",
+            popoverColor: "#121d2d",
+            borderColor: "#24344b",
+            textColorBase: "#d9e3ef",
+            textColor2: "#a9bdd2",
+            textColor3: "#8ea3bb"
+          },
+          Layout: {
+            color: "#0d1420",
+            siderColor: "#0f1725",
+            headerColor: "rgba(9, 15, 24, 0.85)",
+            contentColor: "#0c131e",
+            borderColor: "#24344b"
+          },
+          Card: {
+            borderRadius: "14px",
+            color: "rgba(16, 25, 38, 0.9)",
+            titleFontSizeSmall: "15px",
+            borderColor: "#2a3a51"
+          },
+          DataTable: {
+            thColor: "#121d2d",
+            tdColor: "rgba(16, 25, 38, 0.62)",
+            borderColor: "#27384f",
+            thTextColor: "#bfd1e4",
+            tdTextColor: "#d5e2f0"
+          },
+          Input: {
+            color: "rgba(13, 20, 32, 0.82)",
+            colorFocus: "rgba(13, 20, 32, 0.92)",
+            border: "1px solid #2a3a51",
+            borderHover: "1px solid #3a516e",
+            borderFocus: "1px solid #3ea6ff"
+          },
+          Alert: {
+            borderRadius: "10px"
+          }
+        };
+
+        const status = Vue.reactive({
+          running: false,
+          status_text: "就绪",
+          progress: 0,
+          sync_busy: false,
+          remote_busy: false
+        });
+
+        const dashForm = Vue.reactive({
+          num_accounts: 1,
+          sleep_min: 5,
+          sleep_max: 30,
+          proxy: ""
+        });
+
+        const settingsForm = Vue.reactive({
+          worker_domain: "",
+          freemail_username: "",
+          freemail_password: "",
+          openai_ssl_verify: true,
+          skip_net_check: false,
+          accounts_sync_api_url: "",
+          accounts_sync_bearer_token: "",
+          accounts_list_api_base: "",
+          accounts_list_timezone: "Asia/Shanghai"
+        });
+
+        const loading = Vue.reactive({
+          start: false,
+          save: false,
+          json: false,
+          accounts: false,
+          sync: false,
+          remote: false,
+          logs: false
+        });
+
+        const jsonRows = Vue.ref([]);
+        const jsonSelection = Vue.ref([]);
+        const jsonInfo = Vue.reactive({ file_count: 0, account_total: 0 });
+
+        const accountRows = Vue.ref([]);
+        const accountSelection = Vue.ref([]);
+        const accountInfo = Vue.reactive({ total: 0, path: "accounts.txt" });
+
+        const remoteRows = Vue.ref([]);
+        const remoteSearch = Vue.ref("");
+        const remoteMeta = Vue.reactive({ total: 0, pages: 1, loaded: 0, ready: false });
+
+        const logLines = Vue.ref([]);
+        const logSince = Vue.ref(0);
+
+        let pollTimer = null;
+        let pollTick = 0;
+
+        const progressPercent = Vue.computed(() => {
+          const p = Number(status.progress || 0) * 100;
+          return Math.max(0, Math.min(100, Math.round(p)));
+        });
+
+        const statusTagType = Vue.computed(() => {
+          if (status.running) return "success";
+          if ((status.status_text || "").includes("停止")) return "warning";
+          return "default";
+        });
+
+        const remoteInfoText = Vue.computed(() => {
+          if (status.remote_busy || loading.remote) {
+            if (!remoteMeta.loaded) return "正在拉取第 1 页...";
+            return `正在拉取中 · 已展示 ${remoteMeta.loaded} 条 · 预计 ${remoteMeta.pages} 页`;
+          }
+          if (!remoteMeta.loaded) return "未加载";
+          return `已拉取 ${remoteMeta.pages} 页 · 共 ${remoteMeta.total} 条 · 已显示 ${remoteMeta.loaded} 条`;
+        });
+
+        const logText = Vue.computed(() => {
+          return logLines.value.join("\\n");
+        });
+
+        function rowKeyPath(row) {
+          return row.path;
+        }
+
+        function rowKeyAccount(row) {
+          return row.key;
+        }
+
+        function rowKeyRemote(row) {
+          return row.key;
+        }
+
+        function statusMeta(code) {
+          if (code === "ok") return { type: "success", text: "已同步" };
+          if (code === "pending") return { type: "warning", text: "待同步" };
+          if (code === "dup") return { type: "error", text: "重复" };
+          return { type: "default", text: "-" };
+        }
+
+        const jsonColumns = [
+          { type: "selection", multiple: true },
+          { title: "文件名", key: "name", minWidth: 180, ellipsis: { tooltip: true } },
+          { title: "账号数", key: "count", width: 80 },
+          { title: "创建时间", key: "created", width: 168 },
+          { title: "导出时间", key: "exported", width: 168 }
+        ];
+
+        const accountColumns = [
+          { type: "selection", multiple: true },
+          { title: "#", key: "index", width: 56 },
+          { title: "邮箱", key: "email", minWidth: 220, ellipsis: { tooltip: true } },
+          { title: "密码", key: "password", minWidth: 180, ellipsis: { tooltip: true } },
+          {
+            title: "同步",
+            key: "status",
+            width: 90,
+            render(row) {
+              const meta = statusMeta(row.status);
+              return Vue.h(
+                naive.NTag,
+                { type: meta.type, size: "small", bordered: false },
+                { default: () => meta.text }
+              );
+            }
+          }
+        ];
+
+        const remoteColumns = [
+          { title: "ID", key: "id", width: 64 },
+          { title: "名称/邮箱", key: "name", minWidth: 210, ellipsis: { tooltip: true } },
+          { title: "平台", key: "platform", width: 70 },
+          { title: "类型", key: "type", width: 60 },
+          { title: "状态", key: "status", width: 76 },
+          { title: "分组", key: "groups", minWidth: 150, ellipsis: { tooltip: true } },
+          { title: "5h", key: "u5h", width: 72 },
+          { title: "7d", key: "u7d", width: 72 }
+        ];
+
+        async function apiRequest(path, options = {}) {
+          const opts = Object.assign({}, options);
+          if (!opts.method) opts.method = "GET";
+          if (opts.body && typeof opts.body !== "string") {
+            opts.body = JSON.stringify(opts.body);
+            opts.headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+          }
+          const resp = await fetch(path, opts);
+          let payload = null;
+          try {
+            payload = await resp.json();
+          } catch (_e) {
+            payload = { ok: false, error: `HTTP ${resp.status}` };
+          }
+          if (!resp.ok || !payload.ok) {
+            throw new Error(payload.error || `HTTP ${resp.status}`);
+          }
+          return payload.data;
+        }
+
+        function assignConfig(cfg) {
+          dashForm.num_accounts = Number(cfg.num_accounts || 1);
+          dashForm.sleep_min = Number(cfg.sleep_min || 5);
+          dashForm.sleep_max = Number(cfg.sleep_max || 30);
+          dashForm.proxy = String(cfg.proxy || "");
+
+          settingsForm.worker_domain = String(cfg.worker_domain || "");
+          settingsForm.freemail_username = String(cfg.freemail_username || "");
+          settingsForm.freemail_password = String(cfg.freemail_password || "");
+          settingsForm.openai_ssl_verify = !!cfg.openai_ssl_verify;
+          settingsForm.skip_net_check = !!cfg.skip_net_check;
+          settingsForm.accounts_sync_api_url = String(cfg.accounts_sync_api_url || "");
+          settingsForm.accounts_sync_bearer_token = String(cfg.accounts_sync_bearer_token || "");
+          settingsForm.accounts_list_api_base = String(cfg.accounts_list_api_base || "");
+          settingsForm.accounts_list_timezone = String(cfg.accounts_list_timezone || "Asia/Shanghai");
+        }
+
+        function buildPayload() {
+          return {
+            num_accounts: Number(dashForm.num_accounts || 1),
+            sleep_min: Number(dashForm.sleep_min || 5),
+            sleep_max: Number(dashForm.sleep_max || 30),
+            proxy: String(dashForm.proxy || "").trim(),
+            worker_domain: String(settingsForm.worker_domain || "").trim(),
+            freemail_username: String(settingsForm.freemail_username || "").trim(),
+            freemail_password: String(settingsForm.freemail_password || "").trim(),
+            openai_ssl_verify: !!settingsForm.openai_ssl_verify,
+            skip_net_check: !!settingsForm.skip_net_check,
+            accounts_sync_api_url: String(settingsForm.accounts_sync_api_url || "").trim(),
+            accounts_sync_bearer_token: String(settingsForm.accounts_sync_bearer_token || "").trim(),
+            accounts_list_api_base: String(settingsForm.accounts_list_api_base || "").trim(),
+            accounts_list_timezone: String(settingsForm.accounts_list_timezone || "Asia/Shanghai").trim()
+          };
+        }
+
+        async function loadConfig() {
+          const data = await apiRequest("/api/config");
+          assignConfig(data);
+        }
+
+        async function saveConfig(showSuccess = true) {
+          loading.save = true;
+          try {
+            const data = await apiRequest("/api/config", {
+              method: "POST",
+              body: buildPayload()
+            });
+            assignConfig(data);
+            if (showSuccess) message.success("配置已保存");
+          } finally {
+            loading.save = false;
+          }
+        }
+
+        async function loadStatus() {
+          const data = await apiRequest("/api/status");
+          status.running = !!data.running;
+          status.status_text = String(data.status_text || "就绪");
+          status.progress = Number(data.progress || 0);
+          status.sync_busy = !!data.sync_busy;
+          status.remote_busy = !!data.remote_busy;
+        }
+
+        async function pullLogs() {
+          if (loading.logs) return;
+          loading.logs = true;
+          try {
+            const data = await apiRequest(`/api/logs?since=${logSince.value}`);
+            const items = Array.isArray(data.items) ? data.items : [];
+            if (items.length) {
+              for (const it of items) {
+                logLines.value.push(String(it.line || ""));
+              }
+              if (logLines.value.length > 1600) {
+                logLines.value.splice(0, logLines.value.length - 1600);
+              }
+            }
+            logSince.value = Number(data.last_id || logSince.value);
+          } finally {
+            loading.logs = false;
+          }
+        }
+
+        async function manualPoll() {
+          await loadStatus();
+          await pullLogs();
+        }
+
+        async function clearLogs() {
+          await apiRequest("/api/logs/clear", { method: "POST" });
+          logLines.value = [];
+          logSince.value = 0;
+          await pullLogs();
+          message.success("日志已清空");
+        }
+
+        async function refreshJson(showSuccess = false) {
+          loading.json = true;
+          try {
+            const data = await apiRequest("/api/data/json");
+            jsonRows.value = Array.isArray(data.items) ? data.items : [];
+            jsonInfo.file_count = Number(data.file_count || 0);
+            jsonInfo.account_total = Number(data.account_total || 0);
+            const allowed = new Set(jsonRows.value.map((x) => x.path));
+            jsonSelection.value = jsonSelection.value.filter((k) => allowed.has(k));
+            if (showSuccess) message.success("JSON 列表已刷新");
+          } finally {
+            loading.json = false;
+          }
+        }
+
+        async function refreshAccounts(showSuccess = false) {
+          loading.accounts = true;
+          try {
+            const data = await apiRequest("/api/data/accounts");
+            accountRows.value = Array.isArray(data.items) ? data.items : [];
+            accountInfo.total = Number(data.total || 0);
+            accountInfo.path = String(data.path || "accounts.txt");
+            const allowed = new Set(accountRows.value.map((x) => x.key));
+            accountSelection.value = accountSelection.value.filter((k) => allowed.has(k));
+            if (showSuccess) message.success("账号列表已刷新");
+          } finally {
+            loading.accounts = false;
+          }
+        }
+
+        async function loadRemoteCache() {
+          const data = await apiRequest("/api/remote/cache");
+          remoteRows.value = Array.isArray(data.items) ? data.items : [];
+          remoteMeta.total = Number(data.total || 0);
+          remoteMeta.pages = Number(data.pages || 1);
+          remoteMeta.loaded = Number(data.loaded || 0);
+          remoteMeta.ready = !!data.ready;
+        }
+
+        async function fetchRemoteAll() {
+          loading.remote = true;
+          try {
+            remoteRows.value = [];
+            remoteMeta.total = 0;
+            remoteMeta.pages = 1;
+            remoteMeta.loaded = 0;
+            remoteMeta.ready = false;
+
+            const data = await apiRequest("/api/remote/fetch-all", {
+              method: "POST",
+              body: { search: remoteSearch.value }
+            });
+            await loadRemoteCache();
+            await refreshAccounts(false);
+            message.success(`拉取完成：${Number(data.loaded || remoteMeta.loaded || 0)} 条`);
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.remote = false;
+          }
+        }
+
+        function jsonSelectAll() {
+          jsonSelection.value = jsonRows.value.map((x) => x.path);
+        }
+
+        function jsonSelectNone() {
+          jsonSelection.value = [];
+        }
+
+        async function deleteSelectedJson() {
+          if (!jsonSelection.value.length) {
+            message.warning("请先勾选要删除的 JSON");
+            return;
+          }
+          const names = jsonRows.value
+            .filter((x) => jsonSelection.value.includes(x.path))
+            .map((x) => x.name)
+            .slice(0, 12)
+            .join("\\n");
+          const ok = window.confirm(`将永久删除以下 JSON：\\n\\n${names}${jsonSelection.value.length > 12 ? "\\n…" : ""}\\n\\n此操作不可恢复。`);
+          if (!ok) return;
+
+          try {
+            const data = await apiRequest("/api/data/json/delete", {
+              method: "POST",
+              body: { paths: jsonSelection.value }
+            });
+            jsonSelection.value = [];
+            await Promise.all([refreshJson(false), refreshAccounts(false)]);
+            message.success(`删除完成：JSON ${data.removed_files} 个，账号行 ${data.removed_lines} 条`);
+          } catch (e) {
+            message.error(String(e.message || e));
+          }
+        }
+
+        function acctSelectAll() {
+          accountSelection.value = accountRows.value.map((x) => x.key);
+        }
+
+        function acctSelectNone() {
+          accountSelection.value = [];
+        }
+
+        async function syncSelectedAccounts() {
+          if (!accountSelection.value.length) {
+            message.warning("请先勾选账号");
+            return;
+          }
+          loading.sync = true;
+          try {
+            const keySet = new Set(accountSelection.value);
+            const emails = accountRows.value
+              .filter((x) => keySet.has(x.key))
+              .map((x) => x.email);
+            const data = await apiRequest("/api/data/sync", {
+              method: "POST",
+              body: { emails }
+            });
+            message.success(`同步结束：成功 ${data.ok}，失败 ${data.fail}`);
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.sync = false;
+          }
+        }
+
+        async function startRun() {
+          loading.start = true;
+          try {
+            await apiRequest("/api/start", {
+              method: "POST",
+              body: buildPayload()
+            });
+            await loadStatus();
+            message.success("任务已启动");
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.start = false;
+          }
+        }
+
+        async function stopRun() {
+          try {
+            await apiRequest("/api/stop", { method: "POST" });
+            await loadStatus();
+            message.info("已发出停止指令");
+          } catch (e) {
+            message.error(String(e.message || e));
+          }
+        }
+
+        async function initialLoad() {
+          await loadConfig();
+          await Promise.all([
+            refreshJson(false),
+            refreshAccounts(false),
+            loadRemoteCache(),
+            loadStatus(),
+            pullLogs()
+          ]);
+        }
+
+        async function poll() {
+          try {
+            await loadStatus();
+            await pullLogs();
+            pollTick += 1;
+            if (status.running && pollTick % 4 === 0) {
+              await Promise.all([refreshJson(false), refreshAccounts(false)]);
+            }
+            if (
+              activeTab.value === "data" &&
+              (status.remote_busy || loading.remote || pollTick % 6 === 0)
+            ) {
+              await loadRemoteCache();
+            }
+          } catch (_e) {
+            // 轮询容错，下一轮重试。
+          }
+        }
+
+        Vue.onMounted(async () => {
+          try {
+            await initialLoad();
+          } catch (e) {
+            message.error(String(e.message || e));
+          }
+          pollTimer = window.setInterval(poll, 1500);
+        });
+
+        Vue.onBeforeUnmount(() => {
+          if (pollTimer) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        });
+
+        return {
+          darkTheme,
+          themeOverrides,
+          activeTab,
+          menuOptions,
+          status,
+          progressPercent,
+          statusTagType,
+          dashForm,
+          settingsForm,
+          loading,
+          jsonRows,
+          jsonSelection,
+          jsonInfo,
+          accountRows,
+          accountSelection,
+          accountInfo,
+          remoteRows,
+          remoteSearch,
+          remoteMeta,
+          remoteInfoText,
+          logText,
+          jsonColumns,
+          accountColumns,
+          remoteColumns,
+          rowKeyPath,
+          rowKeyAccount,
+          rowKeyRemote,
+          saveConfig,
+          refreshJson,
+          refreshAccounts,
+          fetchRemoteAll,
+          jsonSelectAll,
+          jsonSelectNone,
+          deleteSelectedJson,
+          acctSelectAll,
+          acctSelectNone,
+          syncSelectedAccounts,
+          startRun,
+          stopRun,
+          clearLogs,
+          manualPoll
+        };
+      },
+      template: `
+        <n-config-provider :theme="darkTheme" :theme-overrides="themeOverrides">
+          <div class="page-wrap">
+            <n-layout has-sider class="main-layout">
+              <n-layout-sider class="sider" :width="220" bordered>
+                <div class="brand">
+                  <h2>CodeX Register</h2>
+                  <p>Naive UI Web 控制台</p>
+                </div>
+                <n-menu :value="activeTab" :options="menuOptions" @update:value="activeTab = $event" />
+              </n-layout-sider>
+
+              <n-layout>
+                <n-layout-header class="header">
+                  <div class="header-title">
+                    <h1>注册任务面板</h1>
+                    <p>保持配置、运行、数据同步在同一页面完成</p>
+                  </div>
+                  <div class="header-status">
+                    <n-tag :type="statusTagType" size="large" :bordered="false">{{ status.status_text }}</n-tag>
+                    <div class="progress-wrap">
+                      <span>{{ progressPercent }}%</span>
+                      <n-progress type="line" :percentage="progressPercent" :show-indicator="false" />
+                    </div>
+                  </div>
+                </n-layout-header>
+
+                <n-layout-content class="content">
+                  <div v-if="activeTab === 'dash'" class="tab-page">
+                    <n-card class="glass-card" title="运行任务" size="small">
+                    <div class="dash-grid">
+                      <div>
+                        <n-form label-placement="left" label-width="96" :model="dashForm">
+                          <n-form-item label="注册数量">
+                            <n-input-number v-model:value="dashForm.num_accounts" :min="1" style="width: 220px" />
+                          </n-form-item>
+                          <n-form-item label="冷却最小(秒)">
+                            <n-input-number v-model:value="dashForm.sleep_min" :min="1" style="width: 220px" />
+                          </n-form-item>
+                          <n-form-item label="冷却最大(秒)">
+                            <n-input-number v-model:value="dashForm.sleep_max" :min="1" style="width: 220px" />
+                          </n-form-item>
+                          <n-form-item label="代理地址">
+                            <n-input v-model:value="dashForm.proxy" placeholder="留空直连；例 http://127.0.0.1:7890" />
+                          </n-form-item>
+                        </n-form>
+                        <div class="dash-actions">
+                          <n-button type="primary" :loading="loading.start" :disabled="status.running" @click="startRun">开始注册</n-button>
+                          <n-button type="warning" ghost :disabled="!status.running" @click="stopRun">停止</n-button>
+                          <n-button secondary :loading="loading.save" @click="saveConfig(true)">保存配置</n-button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <n-alert type="info" title="运行说明" :show-icon="false">
+                          启动后会在后台按配置调用 r_with_pwd.run，日志实时出现在底部。<br />
+                          建议先保存配置，再开始任务；停止后可在「数据」页继续管理导出与同步。
+                        </n-alert>
+                        <n-alert style="margin-top: 10px" type="warning" title="网络提醒" :show-icon="false">
+                          若管理端/API 访问失败，请确认代理地址与证书校验开关是否匹配当前网络。
+                        </n-alert>
+                      </div>
+                    </div>
+                  </n-card>
+                  </div>
+
+                  <div v-else-if="activeTab === 'data'" class="tab-page">
+                    <div class="split-grid">
+                      <n-card class="glass-card" title="导出 JSON" size="small">
+                        <template #header-extra>
+                          <span class="meta">{{ jsonInfo.file_count }} 个文件 · {{ jsonInfo.account_total }} 账号</span>
+                        </template>
+                        <div class="toolbar">
+                          <n-button size="small" @click="refreshJson(true)">刷新</n-button>
+                          <n-button size="small" @click="jsonSelectAll">全选</n-button>
+                          <n-button size="small" @click="jsonSelectNone">全不选</n-button>
+                          <n-button size="small" type="error" ghost @click="deleteSelectedJson">删除已勾选</n-button>
+                        </div>
+                        <n-data-table
+                          size="small"
+                          table-layout="fixed"
+                          :single-line="false"
+                          :columns="jsonColumns"
+                          :data="jsonRows"
+                          :row-key="rowKeyPath"
+                          v-model:checked-row-keys="jsonSelection"
+                        />
+                      </n-card>
+
+                      <n-card class="glass-card" title="账号列表" size="small">
+                        <template #header-extra>
+                          <span class="meta">共 {{ accountInfo.total }} 个 · {{ accountInfo.path }}</span>
+                        </template>
+                        <div class="toolbar">
+                          <n-button size="small" @click="refreshAccounts(true)">刷新</n-button>
+                          <n-button size="small" @click="acctSelectAll">全选</n-button>
+                          <n-button size="small" @click="acctSelectNone">全不选</n-button>
+                          <n-button size="small" type="primary" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts">同步已勾选</n-button>
+                        </div>
+                        <n-data-table
+                          size="small"
+                          table-layout="fixed"
+                          :single-line="false"
+                          :columns="accountColumns"
+                          :data="accountRows"
+                          :row-key="rowKeyAccount"
+                          v-model:checked-row-keys="accountSelection"
+                        />
+                      </n-card>
+                    </div>
+
+                    <n-card class="glass-card" title="服务端账号（管理端）" size="small" style="margin-top: 12px">
+                      <template #header-extra>
+                        <n-space :size="8">
+                          <n-input
+                            v-model:value="remoteSearch"
+                            clearable
+                            placeholder="搜索名称/邮箱"
+                            style="width: 220px"
+                          />
+                          <n-button type="primary" :loading="loading.remote || status.remote_busy" @click="fetchRemoteAll">获取列表与额度</n-button>
+                        </n-space>
+                      </template>
+                      <div class="meta">{{ remoteInfoText }}</div>
+                      <n-data-table
+                        size="small"
+                        table-layout="fixed"
+                        :single-line="false"
+                        :columns="remoteColumns"
+                        :data="remoteRows"
+                        :row-key="rowKeyRemote"
+                      />
+                    </n-card>
+                  </div>
+
+                  <div v-else-if="activeTab === 'settings'" class="tab-page">
+                    <n-card class="glass-card" title="服务与邮箱配置" size="small">
+                    <n-form label-placement="left" label-width="180" :model="settingsForm">
+                      <n-form-item label="Worker 域名">
+                        <n-input v-model:value="settingsForm.worker_domain" placeholder="example.com 或 https://example.com" />
+                      </n-form-item>
+                      <n-form-item label="Freemail 用户名">
+                        <n-input v-model:value="settingsForm.freemail_username" />
+                      </n-form-item>
+                      <n-form-item label="Freemail 密码">
+                        <n-input v-model:value="settingsForm.freemail_password" type="password" show-password-on="click" />
+                      </n-form-item>
+                      <n-form-item label="同步 API 地址">
+                        <n-input v-model:value="settingsForm.accounts_sync_api_url" />
+                      </n-form-item>
+                      <n-form-item label="账号列表 API">
+                        <n-input v-model:value="settingsForm.accounts_list_api_base" />
+                      </n-form-item>
+                      <n-form-item label="Bearer Token">
+                        <n-input v-model:value="settingsForm.accounts_sync_bearer_token" type="password" show-password-on="mousedown" />
+                      </n-form-item>
+                      <n-form-item label="Timezone">
+                        <n-input v-model:value="settingsForm.accounts_list_timezone" placeholder="Asia/Shanghai" />
+                      </n-form-item>
+                      <n-form-item label="校验 HTTPS 证书">
+                        <n-switch v-model:value="settingsForm.openai_ssl_verify" />
+                      </n-form-item>
+                      <n-form-item label="跳过网络地区检测">
+                        <n-switch v-model:value="settingsForm.skip_net_check" />
+                      </n-form-item>
+                    </n-form>
+                    <n-space>
+                      <n-button type="primary" :loading="loading.save" @click="saveConfig(true)">保存配置</n-button>
+                      <n-button @click="manualPoll">刷新状态</n-button>
+                    </n-space>
+                    </n-card>
+                  </div>
+
+                  <div v-else class="tab-page log-page">
+                    <n-card class="glass-card log-card" title="运行日志" size="small">
+                      <template #header-extra>
+                        <n-space :size="8">
+                          <n-button size="small" @click="manualPoll">刷新</n-button>
+                          <n-button size="small" @click="clearLogs">清空</n-button>
+                        </n-space>
+                      </template>
+                      <n-scrollbar class="log-scroll">
+                        <pre class="log-view">{{ logText || '暂无日志' }}</pre>
+                      </n-scrollbar>
+                    </n-card>
+                  </div>
+                </n-layout-content>
+              </n-layout>
+            </n-layout>
+          </div>
+        </n-config-provider>
+      `
+    };
+
+    Vue.createApp(App).mount("#app");
+    window.__codexMounted = true;
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
+class ApiHandler(BaseHTTPRequestHandler):
+    """本地 HTTP API + 单页前端分发。"""
+
+    service: RegisterService | None = None
+    index_html_bytes: bytes = b""
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _ok(self, data: Any = None) -> None:
+        self._send_json(HTTPStatus.OK, {"ok": True, "data": data})
+
+    def _err(self, msg: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+        self._send_json(status, {"ok": False, "error": msg})
+
+    def _read_json_body(self) -> dict[str, Any]:
+        raw_len = self.headers.get("Content-Length")
+        if not raw_len:
+            return {}
+        try:
+            length = int(raw_len)
+        except ValueError as e:
+            raise ValueError("无效 Content-Length") from e
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON 解析失败: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("请求体必须为 JSON 对象")
+        return data
+
+    def do_GET(self) -> None:
+        service = self.service
+        if service is None:
+            self._err("服务未初始化", HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        try:
+            if path in {"/", "/index.html"}:
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    self.index_html_bytes,
+                    "text/html; charset=utf-8",
+                )
+                return
+
+            if path == "/favicon.ico":
+                self._send_bytes(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
+                return
+
+            if path == "/api/config":
+                self._ok(service.get_config())
+                return
+
+            if path == "/api/status":
+                self._ok(service.status())
+                return
+
+            if path == "/api/logs":
+                qs = urllib.parse.parse_qs(parsed.query)
+                try:
+                    since = int((qs.get("since") or ["0"])[0])
+                except (TypeError, ValueError):
+                    since = 0
+                self._ok(service.fetch_logs(max(0, since)))
+                return
+
+            if path == "/api/data/json":
+                self._ok(service.list_json_files())
+                return
+
+            if path == "/api/data/accounts":
+                self._ok(service.list_accounts())
+                return
+
+            if path == "/api/remote/cache":
+                self._ok(service.remote_cache())
+                return
+
+            self._err("未找到接口", HTTPStatus.NOT_FOUND)
+        except Exception as e:
+            self._err(str(e), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:
+        service = self.service
+        if service is None:
+            self._err("服务未初始化", HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        try:
+            if path == "/api/config":
+                payload = self._read_json_body()
+                self._ok(service.update_config(payload, emit_log=True))
+                return
+
+            if path == "/api/start":
+                payload = self._read_json_body()
+                self._ok(service.start(payload))
+                return
+
+            if path == "/api/stop":
+                self._ok(service.stop())
+                return
+
+            if path == "/api/logs/clear":
+                service.clear_logs()
+                self._ok({"done": True})
+                return
+
+            if path == "/api/data/json/delete":
+                payload = self._read_json_body()
+                paths = payload.get("paths") or []
+                if not isinstance(paths, list):
+                    raise ValueError("paths 必须为数组")
+                self._ok(service.delete_json_files(paths))
+                return
+
+            if path == "/api/data/sync":
+                payload = self._read_json_body()
+                emails = payload.get("emails") or []
+                if not isinstance(emails, list):
+                    raise ValueError("emails 必须为数组")
+                self._ok(service.sync_selected_accounts(emails))
+                return
+
+            if path == "/api/remote/fetch-all":
+                payload = self._read_json_body()
+                search = str(payload.get("search") or "")
+                self._ok(service.fetch_remote_all_pages(search=search))
+                return
+
+            self._err("未找到接口", HTTPStatus.NOT_FOUND)
+        except ValueError as e:
+            self._err(str(e), HTTPStatus.BAD_REQUEST)
+        except RuntimeError as e:
+            self._err(str(e), HTTPStatus.CONFLICT)
+        except Exception as e:
+            self._err(str(e), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+
+def _create_backend(host: str, port: int) -> tuple[RegisterService, ThreadingHTTPServer, str]:
+    """创建后端服务并返回访问 URL。"""
+    service = RegisterService()
+    ApiHandler.service = service
+    ApiHandler.index_html_bytes = INDEX_HTML.encode("utf-8")
+
+    try:
+        httpd = ThreadingHTTPServer((host, port), ApiHandler)
+    except OSError:
+        httpd = ThreadingHTTPServer((host, 0), ApiHandler)
+
+    bind_host, bind_port = httpd.server_address[:2]
+    ui_host = bind_host
+    if bind_host in {"0.0.0.0", "::", ""}:
+        ui_host = "127.0.0.1"
+    url = f"http://{ui_host}:{bind_port}"
+
+    service.log(f"Web UI 地址：{url}")
+    print(f"[CodeX Register] Web UI running at {url}")
+    return service, httpd, url
+
+
+def _cleanup_backend(
+    service: RegisterService,
+    httpd: ThreadingHTTPServer,
+    *,
+    call_shutdown: bool,
+) -> None:
+    """回收后台线程与服务资源。"""
+    try:
+        service.stop()
+    except Exception:
+        pass
+    if call_shutdown:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+    httpd.server_close()
+
+
+def _run_browser_mode(host: str, port: int, auto_open: bool) -> None:
+    """浏览器模式（兼容旧行为）。"""
+    service, httpd, url = _create_backend(host, port)
+    print("[CodeX Register] 按 Ctrl+C 停止服务")
+    if auto_open:
+        threading.Thread(
+            target=lambda: (time.sleep(0.6), webbrowser.open(url)),
+            daemon=True,
+        ).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _cleanup_backend(service, httpd, call_shutdown=False)
+
+
+def _run_window_mode(host: str, port: int) -> None:
+    """桌面窗口模式（pywebview 容器）。"""
+    try:
+        import webview
+    except ImportError as e:
+        raise RuntimeError(
+            "未安装 pywebview，无法以桌面窗口显示。请先执行: pip install pywebview"
+        ) from e
+
+    service, httpd, url = _create_backend(host, port)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
+    print("[CodeX Register] 已以独立窗口启动，关闭窗口即停止服务")
+    try:
+        webview.create_window(
+            title="CodeX Register",
+            url=url,
+            width=1280,
+            height=860,
+            min_size=(1080, 680),
+            confirm_close=True,
+        )
+        try:
+            webview.start(gui="edgechromium")
+        except Exception as e:
+            low = str(e).lower()
+            if "edgechromium" in low or "webview2" in low:
+                raise RuntimeError(
+                    "当前系统缺少 Microsoft Edge WebView2 Runtime，"
+                    "请安装后再用 window 模式，或先用 --mode browser。"
+                ) from e
+            raise
+    finally:
+        _cleanup_backend(service, httpd, call_shutdown=True)
+
+
+def run_server(host: str, port: int, mode: str, auto_open: bool) -> None:
+    """启动本地服务，支持窗口模式或浏览器模式。"""
+    if mode == "browser":
+        _run_browser_mode(host, port, auto_open=auto_open)
+        return
+    _run_window_mode(host, port)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CodeX Register Web UI")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
+    parser.add_argument(
+        "--mode",
+        default="window",
+        choices=["window", "browser"],
+        help="界面模式：window=独立应用窗口，browser=系统浏览器",
+    )
+    parser.add_argument(
+        "--no-auto-open",
+        action="store_true",
+        help="browser 模式下不自动打开浏览器",
+    )
+    args = parser.parse_args()
+    run_server(args.host, args.port, mode=args.mode, auto_open=not args.no_auto_open)
 
 
 if __name__ == "__main__":
     main()
-

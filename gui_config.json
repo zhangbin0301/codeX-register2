@@ -1,9 +1,16 @@
 {
-  "proxy": "http://127.0.0.1:7890",
+  "num_accounts": 10,
   "sleep_min": 5,
-  "sleep_max": 10,
-  "output_dir": "D:/Desktop/codex账号",
-  "thread_count": 10,
-  "process_count": 1,
-  "once_mode": false
+  "sleep_max": 30,
+  "proxy": "",
+  "worker_domain": "https://mailfree.ylmty520.workers.dev/",
+  "freemail_username": "msglbo",
+  "freemail_password": "xdqqmm141444",
+  "openai_ssl_verify": true,
+  "skip_net_check": false,
+  "accounts_sync_api_url": "https://one.ytb.icu/api/v1/admin/accounts/data",
+  "accounts_sync_bearer_token": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6IjI0MTMwODAxQHFxLmNvbSIsInJvbGUiOiJhZG1pbiIsInRva2VuX3ZlcnNpb24iOjAsImV4cCI6MTc3NDMxNzg3MiwibmJmIjoxNzc0MjMxNDcyLCJpYXQiOjE3NzQyMzE0NzJ9.qzHUsGL7U3pEWBM5ribsSiaPCPXEE3Gvr8_tgBAogQs",
+  "accounts_list_api_base": "https://one.ytb.icu/api/v1/admin/accounts",
+  "accounts_list_page_size": 50,
+  "accounts_list_timezone": "Asia/Shanghai"
 }
