@@ -148,6 +148,13 @@ def _make_api_handler(service, index_html: str):
                     self._ok(service.delete_json_files(paths))
                     return
 
+                if path == "/api/data/json/note":
+                    payload = self._read_json_body()
+                    p = str(payload.get("path") or "")
+                    note = str(payload.get("note") or "")
+                    self._ok(service.save_json_file_note(p, note))
+                    return
+
                 if path == "/api/data/sync":
                     payload = self._read_json_body()
                     emails = payload.get("emails") or []
@@ -168,6 +175,14 @@ def _make_api_handler(service, index_html: str):
                     if not isinstance(ids, list):
                         raise ValueError("ids 必须为数组")
                     self._ok(service.batch_test_remote_accounts(ids))
+                    return
+
+                if path == "/api/remote/revive-batch":
+                    payload = self._read_json_body()
+                    ids = payload.get("ids") or []
+                    if not isinstance(ids, list):
+                        raise ValueError("ids 必须为数组")
+                    self._ok(service.revive_remote_tokens(ids))
                     return
 
                 if path == "/api/remote/delete-batch":
@@ -338,7 +353,7 @@ def _run_window_mode(
         webview.create_window(
             title="CodeX Register",
             url=url,
-            width=1280,
+            width=1550,
             height=860,
             min_size=(1080, 680),
             confirm_close=True,

@@ -1,8 +1,8 @@
 *.json
-!gui_config.example.json
 *.log
 .idea
 .cursor
 __pycache__/
 *.txt
 gui_config.json
+!gui_config.example.json

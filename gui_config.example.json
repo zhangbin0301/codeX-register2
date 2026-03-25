@@ -1,43 +1,52 @@
 {
-  "__注释_说明": "这是配置示例文件，请复制为 gui_config.json 后再填写真实值；不要把真实配置提交到仓库。",
-  "__注释_敏感字段": "accounts_sync_bearer_token、freemail_password、flclash_secret 等属于敏感信息。",
-  "num_accounts": 20, // 账号数量，可选，默认20
-  "num_files": 1, // 文件数量，可选，默认1
-  "concurrency": 3, // 并发数，可选，默认3
-  "sleep_min": 5, // 睡眠最小时间，可选，默认5秒
-  "sleep_max": 30, // 睡眠最大时间，可选，默认30秒
-  "fast_mode": false, // 是否快速模式，可选，默认false
-  "retry_403_wait_sec": 10, // 403重试等待时间，可选，默认10秒
-  "proxy": "", // 代理地址，可选，默认空字符串
-  "flclash_enable_switch": true, // 是否启用代理切换，可选，默认true
-  "flclash_controller": "127.0.0.1:9090", // 代理控制器地址，可选，默认127.0.0.1:9090
-  "flclash_secret": "", // 代理控制器密钥，可选，默认空字符串
-  "flclash_group": "PROXY", // 代理组，可选，默认PROXY
-  "flclash_switch_policy": "round_robin", // 切换策略，可选，默认round_robin
-  "flclash_switch_wait_sec": 1.2, // 切换等待时间，可选，默认1.2秒
-  "flclash_delay_test_url": "https://www.gstatic.com/generate_204", // 延迟测试URL，可选，默认https://www.gstatic.com/generate_204
-  "flclash_delay_timeout_ms": 4000, // 延迟测试超时时间，可选，默认4000毫秒
-  "flclash_delay_max_ms": 1800, // 延迟测试最大时间，可选，默认1800毫秒
-  "flclash_delay_retry": 1, // 延迟测试重试次数，可选，默认1
-  "remote_test_concurrency": 4, // 远程测试并发数，可选，默认4
-  "remote_test_ssl_retry": 2, // 远程测试SSL重试次数，可选，默认2
-  "worker_domain": "https://your-worker.example.workers.dev/", // 工作域名，必填
-  "freemail_username": "your_mail_user", // 邮箱用户名，必填
-  "freemail_password": "your_mail_password", // 邮箱密码，必填
-  "mail_service_provider": "mailfree", // 邮箱服务商，可选，默认mailfree
+  "_note": "示例配置（请复制为 gui_config.json 后再改为你的真实值）",
+  "num_accounts": 20,
+  "num_files": 3,
+  "concurrency": 3,
+  "sleep_min": 1,
+  "sleep_max": 3,
+  "fast_mode": true,
+  "retry_403_wait_sec": 10,
+  "proxy": "http://127.0.0.1:7890",
+
+  "flclash_enable_switch": false,
+  "flclash_controller": "127.0.0.1:9090",
+  "flclash_secret": "",
+  "flclash_group": "PROXY",
+  "flclash_switch_policy": "round_robin",
+  "flclash_switch_wait_sec": 1.2,
+  "flclash_delay_test_url": "https://www.gstatic.com/generate_204",
+  "flclash_delay_timeout_ms": 4000,
+  "flclash_delay_max_ms": 1800,
+  "flclash_delay_retry": 1,
+
+  "remote_test_concurrency": 4,
+  "remote_test_ssl_retry": 2,
+  "remote_revive_concurrency": 4,
+  "mail_delete_concurrency": 4,
+
+  "worker_domain": "https://mailfree.example.workers.dev",
+  "freemail_username": "example_user",
+  "freemail_password": "example_password",
+  "mail_service_provider": "mailfree",
   "mail_domain_allowlist": [
-    "example.com" // 域名白名单，可选，由freeamail自动获取后添加到此列表，并在GUI界面选择使用
-  ], 
-  "mail_domain_error_counts": {}, // 域名风控计数，可选，默认空对象
-  "mailfree_random_domain": true, // 随机域名，可选，默认true
-  "openai_ssl_verify": true, // 是否验证OpenAI SSL证书，可选，默认true
-  "skip_net_check": false, // 是否跳过网络检查，可选，默认false
-  "accounts_sync_api_url": "https://one.ytb.icu/api/v1/admin/accounts/data", // 同步账号数据API地址，必填
-  "accounts_sync_bearer_token": "Bearer your_token_here", // 同步账号数据API token，必填
-  "accounts_list_api_base": "https://one.ytb.icu/api/v1/admin/accounts", // 获取账号列表API地址，必填
-  "accounts_list_page_size": 10, // 获取账号列表每页数量，必填
-  "accounts_list_fetch_workers": 4, // 获取账号列表并发数，必填
-  "accounts_list_ssl_retry": 3, // 获取账号列表SSL重试次数，必填
-  "accounts_list_ssl_retry_wait_sec": 0.8, // 获取账号列表SSL重试等待时间，必填
-  "accounts_list_timezone": "Asia/Shanghai" // 获取账号列表时区，必填
+    "example.com",
+    "mail.example.com"
+  ],
+  "mail_domain_error_counts": {},
+  "mail_domain_registered_counts": {},
+  "json_file_notes": {},
+  "mailfree_random_domain": true,
+
+  "openai_ssl_verify": true,
+  "skip_net_check": false,
+
+  "accounts_sync_api_url": "https://api.example.com/api/v1/admin/accounts/data",
+  "accounts_sync_bearer_token": "Bearer example_token",
+  "accounts_list_api_base": "https://api.example.com/api/v1/admin/accounts",
+  "accounts_list_page_size": 10,
+  "accounts_list_fetch_workers": 4,
+  "accounts_list_ssl_retry": 3,
+  "accounts_list_ssl_retry_wait_sec": 0.8,
+  "accounts_list_timezone": "Asia/Shanghai"
 }

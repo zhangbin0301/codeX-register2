@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -95,6 +96,20 @@ class RegisterService:
             "ok": 0,
             "fail": 0,
         }
+        self._run_stats: dict[str, Any] = {
+            "planned_total": 0,
+            "success_count": 0,
+            "retry_total": 0,
+            "success_rate": 100.0,
+            "last_retry_reason": "",
+            "retry_reasons": {},
+            "started_at": 0.0,
+            "ended_at": 0.0,
+            "elapsed_sec": 0.0,
+            "success_cost_total_ms": 0,
+            "success_cost_count": 0,
+            "avg_success_sec": 0.0,
+        }
         self._mail_client: Any | None = None
         self._mail_client_sig: tuple[str, str, str, str, bool] | None = None
 
@@ -170,6 +185,166 @@ class RegisterService:
                 out[domain] = count
         return out
 
+    @staticmethod
+    def _normalize_domain_registered_counts(values: Any) -> dict[str, int]:
+        if not isinstance(values, dict):
+            return {}
+        out: dict[str, int] = {}
+        for k, v in values.items():
+            domain = str(k or "").strip().lower()
+            if not domain or "@" in domain:
+                continue
+            try:
+                count = int(v)
+            except Exception:
+                continue
+            if count > 0:
+                out[domain] = count
+        return out
+
+    @staticmethod
+    def _email_domain(value: str) -> str:
+        email = str(value or "").strip().lower()
+        if not email or "@" not in email:
+            return ""
+        return email.split("@", 1)[1].strip().lower()
+
+    @staticmethod
+    def _normalize_json_file_notes(values: Any) -> dict[str, str]:
+        if not isinstance(values, dict):
+            return {}
+        out: dict[str, str] = {}
+        for k, v in values.items():
+            name = os.path.basename(str(k or "").strip())
+            if not name or not name.startswith("accounts_") or not name.endswith(".json"):
+                continue
+            note = str(v or "").strip()
+            if len(note) > 120:
+                note = note[:120]
+            if note:
+                out[name] = note
+        return out
+
+    @staticmethod
+    def _file_color_index(file_name: str, palette_size: int = 12) -> int:
+        name = str(file_name or "").strip().lower()
+        if not name:
+            return -1
+        h = 0
+        for ch in name:
+            h = (h * 131 + ord(ch)) & 0x7FFFFFFF
+        size = max(1, int(palette_size or 1))
+        return int(h % size)
+
+    def _calc_run_success_rate_locked(self) -> float:
+        planned = max(0, int(self._run_stats.get("planned_total") or 0))
+        retry_total = max(0, int(self._run_stats.get("retry_total") or 0))
+        if planned <= 0:
+            return 100.0
+        return round((planned / (planned + retry_total)) * 100.0, 2)
+
+    def _reset_run_stats(self, planned_total: int = 0) -> None:
+        now = time.time()
+        with self._lock:
+            self._run_stats = {
+                "planned_total": max(0, int(planned_total or 0)),
+                "success_count": 0,
+                "retry_total": 0,
+                "success_rate": 100.0,
+                "last_retry_reason": "",
+                "retry_reasons": {},
+                "started_at": now,
+                "ended_at": 0.0,
+                "elapsed_sec": 0.0,
+                "success_cost_total_ms": 0,
+                "success_cost_count": 0,
+                "avg_success_sec": 0.0,
+            }
+            self._run_stats["success_rate"] = self._calc_run_success_rate_locked()
+
+    def _refresh_run_elapsed_locked(self) -> None:
+        started = float(self._run_stats.get("started_at") or 0.0)
+        ended = float(self._run_stats.get("ended_at") or 0.0)
+        if started <= 0:
+            self._run_stats["elapsed_sec"] = 0.0
+            return
+        tail = ended if ended > 0 else time.time()
+        self._run_stats["elapsed_sec"] = round(max(0.0, tail - started), 2)
+
+    def _mark_run_finished(self) -> None:
+        with self._lock:
+            self._run_stats["ended_at"] = time.time()
+            self._refresh_run_elapsed_locked()
+
+    def _record_run_success(self, delta: int = 1, duration_ms: int = 0) -> None:
+        inc = max(0, int(delta or 0))
+        dur = max(0, int(duration_ms or 0))
+        if inc <= 0 and dur <= 0:
+            return
+        with self._lock:
+            if inc > 0:
+                self._run_stats["success_count"] = max(
+                    0,
+                    int(self._run_stats.get("success_count") or 0) + inc,
+                )
+            if dur > 0:
+                total_ms = max(0, int(self._run_stats.get("success_cost_total_ms") or 0)) + dur
+                cnt = max(0, int(self._run_stats.get("success_cost_count") or 0)) + 1
+                self._run_stats["success_cost_total_ms"] = total_ms
+                self._run_stats["success_cost_count"] = cnt
+                self._run_stats["avg_success_sec"] = round((total_ms / cnt) / 1000.0, 2)
+
+    def _record_run_retry(self, reason: str) -> tuple[int, float]:
+        why = str(reason or "").strip() or "未知失败"
+        with self._lock:
+            retry_total = max(0, int(self._run_stats.get("retry_total") or 0)) + 1
+            reasons = dict(self._run_stats.get("retry_reasons") or {})
+            reasons[why] = max(0, int(reasons.get(why) or 0)) + 1
+
+            self._run_stats["retry_total"] = retry_total
+            self._run_stats["retry_reasons"] = reasons
+            self._run_stats["last_retry_reason"] = why
+            self._run_stats["success_rate"] = self._calc_run_success_rate_locked()
+            rate = float(self._run_stats.get("success_rate") or 0.0)
+        return retry_total, rate
+
+    @staticmethod
+    def _top_retry_reasons(reason_counts: dict[str, int], limit: int = 3) -> list[dict[str, Any]]:
+        rows = [
+            {"reason": str(k), "count": int(v)}
+            for k, v in (reason_counts or {}).items()
+            if int(v or 0) > 0
+        ]
+        rows.sort(key=lambda x: (-int(x.get("count") or 0), str(x.get("reason") or "")))
+        return rows[: max(1, int(limit or 1))]
+
+    @staticmethod
+    def _retry_reason_from_meta(meta: dict[str, Any]) -> str:
+        code = str(meta.get("error_code") or "").strip().lower()
+        msg = str(meta.get("error_message") or "").strip()
+        mapping = {
+            "otp_timeout": "未收到验证码(OTP超时)",
+            "otp_validate_failed": "验证码校验失败",
+            "mailbox_init_failed": "临时邮箱初始化失败",
+            "net_check_failed": "网络地区检测失败",
+            "auth_continue_failed": "注册前置接口失败(authorize/continue)",
+            "register_password_failed": "密码提交失败(user/register)",
+            "create_account_failed": "创建账号失败(create_account)",
+            "registration_disallowed": "registration_disallowed 风控",
+            "tls_error": "SSL/TLS 异常",
+            "runtime_exception": "运行异常",
+        }
+        base = mapping.get(code, "")
+        if not base and code:
+            base = f"接口错误: {code}"
+        if base and msg:
+            return f"{base}: {msg}"
+        if base:
+            return base
+        if msg:
+            return msg
+        return ""
+
     def log(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         text = str(msg)
@@ -202,6 +377,8 @@ class RegisterService:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            self._refresh_run_elapsed_locked()
+            reasons = dict(self._run_stats.get("retry_reasons") or {})
             return {
                 "running": self._running,
                 "status_text": self._status_text,
@@ -213,6 +390,15 @@ class RegisterService:
                 "remote_test_done": int(self._remote_test_stats.get("done", 0)),
                 "remote_test_ok": int(self._remote_test_stats.get("ok", 0)),
                 "remote_test_fail": int(self._remote_test_stats.get("fail", 0)),
+                "run_planned_total": int(self._run_stats.get("planned_total", 0)),
+                "run_success_count": int(self._run_stats.get("success_count", 0)),
+                "run_retry_total": int(self._run_stats.get("retry_total", 0)),
+                "run_success_rate": float(self._run_stats.get("success_rate", 100.0)),
+                "run_last_retry_reason": str(self._run_stats.get("last_retry_reason") or ""),
+                "run_retry_reasons": reasons,
+                "run_retry_reasons_top": self._top_retry_reasons(reasons, limit=3),
+                "run_elapsed_sec": float(self._run_stats.get("elapsed_sec") or 0.0),
+                "run_avg_success_sec": float(self._run_stats.get("avg_success_sec") or 0.0),
             }
 
     def get_config(self) -> dict[str, Any]:
@@ -256,6 +442,20 @@ class RegisterService:
                 cfg.get("remote_test_ssl_retry", 2),
                 0,
                 5,
+            )
+        if "remote_revive_concurrency" in data:
+            cfg["remote_revive_concurrency"] = self._to_int(
+                data.get("remote_revive_concurrency"),
+                cfg.get("remote_revive_concurrency", 4),
+                1,
+                12,
+            )
+        if "mail_delete_concurrency" in data:
+            cfg["mail_delete_concurrency"] = self._to_int(
+                data.get("mail_delete_concurrency"),
+                cfg.get("mail_delete_concurrency", 4),
+                1,
+                12,
             )
         if "accounts_list_ssl_retry" in data:
             cfg["accounts_list_ssl_retry"] = self._to_int(
@@ -339,6 +539,10 @@ class RegisterService:
             cfg["mail_domain_error_counts"] = self._normalize_domain_error_counts(
                 data.get("mail_domain_error_counts")
             )
+        if "mail_domain_registered_counts" in data:
+            cfg["mail_domain_registered_counts"] = self._normalize_domain_registered_counts(
+                data.get("mail_domain_registered_counts")
+            )
         if "fast_mode" in data:
             cfg["fast_mode"] = self._to_bool(
                 data.get("fast_mode"),
@@ -370,6 +574,12 @@ class RegisterService:
         )
         cfg["mail_domain_error_counts"] = self._normalize_domain_error_counts(
             cfg.get("mail_domain_error_counts") or {}
+        )
+        cfg["mail_domain_registered_counts"] = self._normalize_domain_registered_counts(
+            cfg.get("mail_domain_registered_counts") or {}
+        )
+        cfg["json_file_notes"] = self._normalize_json_file_notes(
+            cfg.get("json_file_notes") or {}
         )
 
         cfg["accounts_list_page_size"] = 10
@@ -456,6 +666,10 @@ class RegisterService:
         s = str(name or "").strip()
         if not s:
             return False
+
+        if "🇭🇰" in s or "香港" in s or "港区" in s:
+            return True
+
         low = s.lower()
         normalized = (
             low.replace("-", " ")
@@ -465,13 +679,16 @@ class RegisterService:
             .replace("(", " ")
             .replace(")", " ")
         )
-        if "香港" in s:
+        compact = re.sub(r"[\s_\-|/()\[\]{}]+", "", low)
+
+        if "hongkong" in compact or "hong kong" in normalized:
             return True
-        if "hong kong" in normalized or "hongkong" in normalized:
+        if re.search(r"(^|[^a-z0-9])hkg([^a-z0-9]|$)", normalized):
             return True
-        if "hkg" in normalized:
+        if re.search(r"(^|[^a-z0-9])hk\d*([^a-z0-9]|$)", normalized):
             return True
-        if " hk " in f" {normalized} ":
+        # 兼容无分隔写法：hk01 / hk1 / hk02-us
+        if re.search(r"(^|[^a-z0-9])hk\d+", low):
             return True
         return False
 
@@ -595,15 +812,33 @@ class RegisterService:
             save_config(self.cfg)
         return now
 
+    def _record_mail_domain_registered(self, domain: str) -> int:
+        d = str(domain or "").strip().lower()
+        if not d:
+            return 0
+        with self._lock:
+            counts = self._normalize_domain_registered_counts(
+                self.cfg.get("mail_domain_registered_counts") or {}
+            )
+            now = int(counts.get(d, 0)) + 1
+            counts[d] = now
+            self.cfg["mail_domain_registered_counts"] = counts
+            save_config(self.cfg)
+        return now
+
     def mail_domain_stats(self) -> dict[str, Any]:
         with self._lock:
             provider = normalize_mail_provider(self.cfg.get("mail_service_provider") or "mailfree")
             selected = self._normalize_domain_list(self.cfg.get("mail_domain_allowlist") or [])
             counts = self._normalize_domain_error_counts(self.cfg.get("mail_domain_error_counts") or {})
+            registered = self._normalize_domain_registered_counts(
+                self.cfg.get("mail_domain_registered_counts") or {}
+            )
         return {
             "provider": provider,
             "selected": selected,
             "error_counts": counts,
+            "registered_counts": registered,
         }
 
     def mail_providers(self) -> dict[str, Any]:
@@ -621,6 +856,9 @@ class RegisterService:
         current = normalize_mail_provider(self.cfg.get("mail_service_provider") or "mailfree")
         selected = self._normalize_domain_list(self.cfg.get("mail_domain_allowlist") or [])
         err_counts = self._normalize_domain_error_counts(self.cfg.get("mail_domain_error_counts") or {})
+        registered_counts = self._normalize_domain_registered_counts(
+            self.cfg.get("mail_domain_registered_counts") or {}
+        )
         client = self._get_mail_client()
         proxy = self._mail_proxy()
 
@@ -658,6 +896,7 @@ class RegisterService:
             dm: {
                 "selected": (dm in selected) if selected else True,
                 "errors": int(err_counts.get(dm, 0)),
+                "registered": int(registered_counts.get(dm, 0)),
             }
             for dm in domains_out
         }
@@ -668,6 +907,7 @@ class RegisterService:
             "domains": domains_out,
             "selected_domains": selected,
             "domain_error_counts": err_counts,
+            "domain_registered_counts": registered_counts,
             "domain_stats": domain_stats,
             "mailboxes": rows,
             "mailbox_total": len(rows),
@@ -788,7 +1028,9 @@ class RegisterService:
                 ok += 1
             except Exception as e:
                 fail += 1
-                errors.append({"id": mid, "error": str(e)})
+                err_text = str(e)
+                self.log(f"[邮箱] 删除邮件失败: id={mid} -> {err_text}")
+                errors.append({"id": mid, "error": err_text})
 
         return {
             "ok": ok,
@@ -823,11 +1065,22 @@ class RegisterService:
         client = self._get_mail_client()
         proxy = self._mail_proxy()
         try:
-            client.delete_mailbox(target, proxies=proxy)
+            res = client.delete_mailbox(target, proxies=proxy)
         except MailServiceError as e:
             raise RuntimeError(str(e)) from e
-        self.log(f"[邮箱] 已删除邮箱账号: {target}")
-        return {"address": target, "success": True}
+        method = str(res.get("api_method") or "") if isinstance(res, dict) else ""
+        path = str(res.get("api_path") or "") if isinstance(res, dict) else ""
+        api_text = f"{method} {path}".strip()
+        if api_text:
+            self.log(f"[邮箱] 已删除邮箱账号: {target} · 接口 {api_text}")
+        else:
+            self.log(f"[邮箱] 已删除邮箱账号: {target}")
+        return {
+            "address": target,
+            "success": True,
+            "api_method": method,
+            "api_path": path,
+        }
 
     def mail_delete_mailboxes(self, addresses: list[Any]) -> dict[str, Any]:
         ordered: list[str] = []
@@ -841,21 +1094,85 @@ class RegisterService:
         if not ordered:
             raise ValueError("请先选择要删除的邮箱")
 
+        total = len(ordered)
+        worker_count = min(
+            total,
+            self._to_int(self.cfg.get("mail_delete_concurrency"), 4, 1, 12),
+        )
+        self.log(f"[邮箱] 批量删除启动: 总数 {total}，并发 {worker_count}")
+
         ok = 0
         fail = 0
         errors: list[dict[str, str]] = []
-        for addr in ordered:
+        api_used: dict[str, int] = {}
+        state_lock = threading.Lock()
+
+        def _run_one(idx_addr: tuple[int, str]) -> tuple[int, dict[str, Any]]:
+            idx, addr = idx_addr
             try:
-                self.mail_delete_mailbox(addr)
-                ok += 1
+                res = self.mail_delete_mailbox(addr)
+                method = str((res or {}).get("api_method") or "")
+                path = str((res or {}).get("api_path") or "")
+                api = f"{method} {path}".strip()
+                with state_lock:
+                    nonlocal ok
+                    ok += 1
+                    if api:
+                        api_used[api] = int(api_used.get(api, 0)) + 1
+                return idx, {"address": addr, "success": True, "api": api}
             except Exception as e:
-                fail += 1
-                errors.append({"address": addr, "error": str(e)})
+                err_text = str(e)
+                self.log(f"[邮箱] 删除失败: {addr} -> {err_text}")
+                with state_lock:
+                    nonlocal fail
+                    fail += 1
+                return idx, {"address": addr, "success": False, "error": err_text}
+
+        ordered_pairs = list(enumerate(ordered))
+        results_by_idx: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_run_one, it) for it in ordered_pairs]
+            for fut in as_completed(futures):
+                try:
+                    idx, item = fut.result()
+                except Exception as e:
+                    idx = -1
+                    item = {"address": "-", "success": False, "error": str(e)}
+                results_by_idx[idx] = item
+
+        ordered_results: list[dict[str, Any]] = []
+        for i in range(total):
+            item = results_by_idx.get(i) or {
+                "address": ordered[i],
+                "success": False,
+                "error": "未知错误",
+            }
+            ordered_results.append(item)
+            if not item.get("success"):
+                errors.append(
+                    {
+                        "address": str(item.get("address") or ""),
+                        "error": str(item.get("error") or "未知错误"),
+                    }
+                )
+
+        api_summary = [
+            {"api": k, "count": int(v)}
+            for k, v in sorted(api_used.items(), key=lambda x: (-int(x[1]), str(x[0])))
+        ]
+        if api_summary:
+            apis = "；".join([f"{it['api']} ×{it['count']}" for it in api_summary[:4]])
+            self.log(f"[邮箱] 批量删除接口统计: {apis}")
+
+        self.log(f"[邮箱] 批量删除结束: 成功 {ok}，失败 {fail}")
         return {
             "ok": ok,
             "fail": fail,
-            "total": len(ordered),
+            "total": total,
             "errors": errors,
+            "api_summary": api_summary,
+            "concurrency": worker_count,
+            "results": ordered_results,
         }
 
     def start(self, run_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -869,6 +1186,7 @@ class RegisterService:
         self._set_running(True)
         self._set_status("运行中")
         self._set_progress(0)
+        self._reset_run_stats(planned_total=0)
         self.log("开始注册任务")
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
@@ -965,6 +1283,7 @@ class RegisterService:
             )
 
             total_target = per_file_num * num_files
+            self._reset_run_stats(planned_total=total_target)
             worker_count = min(concurrency, per_file_num)
             if flclash_enable and worker_count > 1:
                 self.log(
@@ -993,6 +1312,8 @@ class RegisterService:
                 "nodes": [],
                 "current": "",
                 "next_idx": 0,
+                "blocked_hk_count": 0,
+                "blocked_hk_sample": [],
             }
 
             def _flclash_load_nodes() -> tuple[str, list[str], str]:
@@ -1070,6 +1391,8 @@ class RegisterService:
                         filtered.append(node)
 
                 if not filtered:
+                    flclash_state["blocked_hk_count"] = len(blocked)
+                    flclash_state["blocked_hk_sample"] = blocked[:6]
                     if blocked:
                         raise RuntimeError("可用节点均为香港节点，已按规则跳过")
                     if strategy_skipped:
@@ -1078,6 +1401,9 @@ class RegisterService:
                             "请改用包含具体节点的 Selector 组"
                         )
                     raise RuntimeError("代理组没有可用节点")
+
+                flclash_state["blocked_hk_count"] = len(blocked)
+                flclash_state["blocked_hk_sample"] = blocked[:6]
 
                 current = str(target_obj.get("now") or "").strip()
                 if current and self._is_hk_node_name(current):
@@ -1249,6 +1575,19 @@ class RegisterService:
                             f"FlClash 动态换 IP 已启用: controller={flclash_state['controller']}, "
                             f"group={g}, nodes={len(nodes)}, 已排除香港节点"
                         )
+                        blocked_cnt = int(flclash_state.get("blocked_hk_count") or 0)
+                        blocked_sample = [
+                            str(x).strip()
+                            for x in (flclash_state.get("blocked_hk_sample") or [])
+                            if str(x).strip()
+                        ]
+                        if blocked_cnt > 0:
+                            show = ", ".join(blocked_sample[:5])
+                            suffix = " ..." if blocked_cnt > len(blocked_sample[:5]) else ""
+                            if show:
+                                self.log(f"FlClash 已屏蔽香港节点 {blocked_cnt} 个: {show}{suffix}")
+                            else:
+                                self.log(f"FlClash 已屏蔽香港节点 {blocked_cnt} 个")
                         self.log(
                             f"FlClash 延迟测试: url={flclash_state['delay_url']}, "
                             f"timeout={flclash_state['delay_timeout_ms']}ms, "
@@ -1368,7 +1707,9 @@ class RegisterService:
                             )
 
                             need_retry = False
+                            retry_reason = ""
                             flc_acquired = False
+                            run_begin = time.time()
 
                             try:
                                 if flclash_state["enabled"]:
@@ -1378,11 +1719,13 @@ class RegisterService:
                                             f"[F{file_no}W{worker_no}] 节点切换/延迟测试失败，跳过本次并补位重试"
                                         )
                                         need_retry = True
+                                        retry_reason = "节点切换/延迟测试失败"
                                         continue
                                 result = r_with_pwd.run(proxy)
                                 if not isinstance(result, (tuple, list)):
                                     self.log(f"[F{file_no}W{worker_no}] 返回异常，跳过")
                                     need_retry = True
+                                    retry_reason = "返回结果异常"
                                 else:
                                     acct = result[0]
                                     pwd = result[1] if len(result) > 1 else ""
@@ -1390,6 +1733,7 @@ class RegisterService:
 
                                     err_code = str(meta.get("error_code") or "").strip().lower()
                                     err_domain = str(meta.get("email_domain") or "").strip().lower()
+                                    meta_reason = self._retry_reason_from_meta(meta)
                                     if err_code == "registration_disallowed" and err_domain:
                                         now = self._record_mail_domain_error(err_domain)
                                         self.log(
@@ -1405,6 +1749,7 @@ class RegisterService:
                                                 break
                                             time.sleep(1)
                                         need_retry = True
+                                        retry_reason = "HTTP 403 限流"
                                     elif acct and isinstance(acct, dict):
                                         email = str(acct.get("name") or "")
                                         written = False
@@ -1419,11 +1764,14 @@ class RegisterService:
                                                         "写入 JSON 失败，准备补位重试"
                                                     )
                                                     need_retry = True
+                                                    retry_reason = "写入 JSON 失败"
                                                 else:
                                                     with state_lock:
                                                         ok += 1
                                                         ok_now = ok
                                                     written = True
+                                                    run_cost_ms = int((time.time() - run_begin) * 1000)
+                                                    self._record_run_success(1, duration_ms=run_cost_ms)
                                                     if email and pwd:
                                                         try:
                                                             pf = (
@@ -1439,6 +1787,9 @@ class RegisterService:
                                                                 f"写入 accounts.txt 失败: {e}"
                                                             )
                                         if written:
+                                            succ_domain = self._email_domain(email)
+                                            if succ_domain:
+                                                self._record_mail_domain_registered(succ_domain)
                                             self.log(
                                                 f"[F{file_no}W{worker_no}] 成功 ({ok_now}/{file_target}): {email}"
                                             )
@@ -1449,9 +1800,11 @@ class RegisterService:
                                     else:
                                         self.log(f"[F{file_no}W{worker_no}] 本次失败")
                                         need_retry = True
+                                        retry_reason = meta_reason or "注册流程失败"
                             except Exception as e:
                                 self.log(f"[F{file_no}W{worker_no}] 异常: {e}")
                                 need_retry = True
+                                retry_reason = f"运行异常({type(e).__name__})"
                             finally:
                                 if flc_acquired:
                                     _flclash_release_for_batch()
@@ -1471,10 +1824,13 @@ class RegisterService:
                             if need_retry and not self._stop.is_set():
                                 retry_ticket = _schedule_retry()
                                 if retry_ticket is not None:
+                                    why = str(retry_reason or "").strip() or "未知失败"
+                                    retry_total, success_rate = self._record_run_retry(why)
                                     task_queue.put(retry_ticket)
                                     self.log(
                                         f"[F{file_no}W{worker_no}] "
-                                        f"失败补位：已追加第 {retry_ticket - file_target} 次补位"
+                                        f"失败补位：已追加第 {retry_ticket - file_target} 次补位，"
+                                        f"原因={why}，当前成功率={success_rate:.2f}%（重试 {retry_total}）"
                                     )
                                 else:
                                     with state_lock:
@@ -1482,9 +1838,11 @@ class RegisterService:
                                         done_now = attempts_done
                                         started_now = attempts_started
                                     if ok_now < file_target and done_now >= started_now:
+                                        why = str(retry_reason or "").strip() or "未知失败"
                                         self.log(
                                             f"[F{file_no}W{worker_no}] "
-                                            f"已达最大尝试上限 {max_attempts}，当前成功 {ok_now}/{file_target}"
+                                            f"已达最大尝试上限 {max_attempts}，当前成功 {ok_now}/{file_target}，"
+                                            f"最近失败原因={why}"
                                         )
 
                             with state_lock:
@@ -1545,6 +1903,30 @@ class RegisterService:
                         self.log(f"[文件 {file_no}/{num_files}] 未补齐，停止后续文件创建")
                     break
 
+            with self._lock:
+                retry_total = int(self._run_stats.get("retry_total") or 0)
+                success_rate = float(self._run_stats.get("success_rate") or 100.0)
+                top_reasons = self._top_retry_reasons(
+                    dict(self._run_stats.get("retry_reasons") or {}),
+                    limit=4,
+                )
+            if retry_total > 0:
+                reason_text = "；".join(
+                    [f"{str(x.get('reason') or '')} ×{int(x.get('count') or 0)}" for x in top_reasons]
+                )
+                self.log(
+                    f"重试统计：{retry_total} 次 · 成功率 {success_rate:.2f}%"
+                    + (f" · 原因：{reason_text}" if reason_text else "")
+                )
+            else:
+                self.log(f"重试统计：0 次 · 成功率 {success_rate:.2f}%")
+
+            with self._lock:
+                self._refresh_run_elapsed_locked()
+                elapsed_sec = float(self._run_stats.get("elapsed_sec") or 0.0)
+                avg_sec = float(self._run_stats.get("avg_success_sec") or 0.0)
+            self.log(f"耗时统计：总耗时 {elapsed_sec:.2f}s · 平均耗时 {avg_sec:.2f}s/成功")
+
             if self._stop.is_set() and global_ok < total_target:
                 tag = (
                     f"已停止 (成功 {global_ok}/{total_target}，"
@@ -1564,6 +1946,7 @@ class RegisterService:
         except Exception as e:
             self.log(f"运行异常: {e}")
         finally:
+            self._mark_run_finished()
             cap.flush()
             sys.stdout = old_out
             sys.stderr = old_err
@@ -1663,7 +2046,40 @@ class RegisterService:
             return files[0]
         return f"{files[0]} +{len(files) - 1}"
 
+    def save_json_file_note(self, path: str, note: str) -> dict[str, Any]:
+        target = os.path.abspath(str(path or "").strip())
+        if not target:
+            raise ValueError("path 不能为空")
+
+        allow = {os.path.abspath(p) for p in glob.glob("accounts_*.json")}
+        if target not in allow or not os.path.isfile(target):
+            raise ValueError("目标 JSON 文件不存在或不可编辑")
+
+        name = os.path.basename(target)
+        clean = str(note or "").strip()
+        if len(clean) > 120:
+            clean = clean[:120]
+
+        with self._lock:
+            notes = self._normalize_json_file_notes(self.cfg.get("json_file_notes") or {})
+            if clean:
+                notes[name] = clean
+            else:
+                notes.pop(name, None)
+            self.cfg["json_file_notes"] = notes
+            save_config(self.cfg)
+
+        self.log(f"已保存备注: {name} -> {clean or '-'}")
+        return {
+            "path": target,
+            "name": name,
+            "note": clean,
+        }
+
     def list_json_files(self) -> dict[str, Any]:
+        with self._lock:
+            notes_map = self._normalize_json_file_notes(self.cfg.get("json_file_notes") or {})
+
         files = sorted(
             glob.glob("accounts_*.json"),
             key=os.path.getmtime,
@@ -1673,13 +2089,13 @@ class RegisterService:
         total = 0
         for fp in files:
             fp_abs = os.path.abspath(fp)
+            name = os.path.basename(fp_abs)
             try:
                 with open(fp_abs, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 cnt = len(data.get("accounts", []))
-                exported = data.get("exported_at", "-")
             except Exception:
-                cnt, exported = 0, "-"
+                cnt = 0
             try:
                 cdate = datetime.fromtimestamp(os.path.getctime(fp_abs)).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
@@ -1688,10 +2104,11 @@ class RegisterService:
             items.append(
                 {
                     "path": fp_abs,
-                    "name": os.path.basename(fp_abs),
+                    "name": name,
                     "count": cnt,
                     "created": cdate,
-                    "exported": exported,
+                    "note": str(notes_map.get(name) or ""),
+                    "file_color_idx": self._file_color_index(name),
                 }
             )
         return {"items": items, "file_count": len(items), "account_total": total}
@@ -1730,6 +2147,7 @@ class RegisterService:
             ep = email.strip().lower()
             status = "normal"
             src_files = list(email_files_map.get(ep, []))
+            primary_source = str(src_files[0] if src_files else "")
             if remote_ready:
                 remote_cnt = int(remote_counts.get(ep, 0))
                 local_cnt = int(local_counts.get(ep, 0))
@@ -1748,6 +2166,8 @@ class RegisterService:
                     "status": status,
                     "source": self._source_label(src_files),
                     "source_files": src_files,
+                    "source_primary": primary_source,
+                    "source_color_idx": self._file_color_index(primary_source),
                 }
             )
         return {
@@ -1768,6 +2188,7 @@ class RegisterService:
         removed_lines = 0
         skipped: list[str] = []
         all_emails: set[str] = set()
+        removed_names: set[str] = set()
 
         for fp in selected:
             if fp not in allow:
@@ -1780,8 +2201,21 @@ class RegisterService:
             try:
                 os.remove(fp)
                 removed_files += 1
+                removed_names.add(os.path.basename(fp))
             except Exception:
                 skipped.append(fp)
+
+        if removed_names:
+            with self._lock:
+                notes = self._normalize_json_file_notes(self.cfg.get("json_file_notes") or {})
+                changed = False
+                for name in removed_names:
+                    if name in notes:
+                        notes.pop(name, None)
+                        changed = True
+                if changed:
+                    self.cfg["json_file_notes"] = notes
+                    save_config(self.cfg)
 
         acct_path = self._accounts_txt_path()
         if all_emails and os.path.isfile(acct_path):
@@ -2292,11 +2726,207 @@ class RegisterService:
         ]
         return any(k in low for k in keys)
 
+    @staticmethod
+    def _is_token_invalidated_error(msg: str) -> bool:
+        """判断错误是否属于 access token 失效。"""
+        low = str(msg or "").strip().lower()
+        if not low:
+            return False
+        keys = [
+            "token_invalidated",
+            "token_revoked",
+            "invalidated oauth token",
+            "encountered invalidated oauth token",
+            "authentication token has been invalidated",
+            "invalid authentication token",
+            "token invalid",
+            "token expired",
+            "access token expired",
+            "jwt expired",
+            "身份验证令牌已失效",
+            "令牌已失效",
+            "token 已失效",
+        ]
+        return any(k in low for k in keys)
+
+    @staticmethod
+    def _is_account_deactivated_error(msg: str) -> bool:
+        low = str(msg or "").strip().lower()
+        if not low:
+            return False
+        keys = [
+            "account has been deactivated",
+            "access deactivated",
+            "账号已被封禁",
+            "账户已被封禁",
+            "deactivated",
+        ]
+        return any(k in low for k in keys)
+
+    @staticmethod
+    def _is_rate_limited_error(msg: str) -> bool:
+        low = str(msg or "").strip().lower()
+        if not low:
+            return False
+        if "429" in low:
+            return True
+        keys = ["rate limit", "too many requests", "请求过于频繁", "限流"]
+        return any(k in low for k in keys)
+
+    @staticmethod
+    def _refresh_api_success(code: int, text: str) -> tuple[bool, str]:
+        """解析 token 刷新接口响应。"""
+        raw = str(text or "")
+        snippet = raw.replace("\n", " ").strip()[:220]
+
+        if not (200 <= int(code or 0) < 300):
+            return False, f"HTTP {code}: {snippet}"
+
+        if not raw.strip():
+            return True, f"HTTP {code}"
+
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            low = raw.lower()
+            if (
+                "success" in low
+                or "refreshed" in low
+                or "ok" == low.strip()
+                or "刷新成功" in raw
+                or "已刷新" in raw
+            ):
+                return True, snippet or f"HTTP {code}"
+            return False, snippet or f"HTTP {code}"
+
+        if isinstance(payload, dict):
+            if "code" in payload:
+                try:
+                    cval = int(payload.get("code") or 0)
+                except Exception:
+                    cval = -1
+                msg = str(payload.get("message") or payload.get("error") or "").strip()
+                if cval == 0:
+                    return True, msg or "code=0"
+                msg_low = msg.lower()
+                if msg and (
+                    "already valid" in msg_low
+                    or "token valid" in msg_low
+                    or "already refreshed" in msg_low
+                    or "已是最新" in msg
+                    or "无需刷新" in msg
+                ):
+                    return True, msg
+                return False, f"code={cval} {msg}".strip()
+
+            if payload.get("success") is True or payload.get("ok") is True:
+                msg = str(payload.get("message") or payload.get("msg") or "").strip()
+                return True, msg or "success=true"
+
+            data = payload.get("data")
+            if isinstance(data, dict):
+                if data.get("success") is True or data.get("ok") is True:
+                    msg = str(data.get("message") or data.get("msg") or "").strip()
+                    return True, msg or "data.success=true"
+
+            msg = str(payload.get("message") or payload.get("error") or "").strip()
+            msg_low = msg.lower()
+            if msg and (
+                "refreshed" in msg_low
+                or "refresh success" in msg_low
+                or "already valid" in msg_low
+                or "已刷新" in msg
+                or "刷新成功" in msg
+            ):
+                return True, msg
+            if msg:
+                return False, msg
+
+        return False, snippet or f"HTTP {code}"
+
+    def _try_refresh_remote_token(
+        self,
+        aid: str,
+        *,
+        base: str,
+        auth: str,
+        verify_ssl: bool,
+        proxy_arg: str | None,
+    ) -> tuple[bool, str, str]:
+        """尝试调用管理端刷新指定账号 token，返回 (是否成功, 详情, 命中接口)。"""
+        aid_clean = str(aid or "").strip()
+        if not aid_clean:
+            return False, "账号 ID 为空", ""
+
+        aid_enc = urllib.parse.quote(aid_clean)
+        root = str(base or "").rstrip("/")
+        body_empty = json.dumps({}, ensure_ascii=False).encode("utf-8")
+        body_id = json.dumps({"id": aid_clean}, ensure_ascii=False).encode("utf-8")
+
+        post_candidates: list[tuple[str, bytes]] = [
+            (f"{root}/{aid_enc}/refresh", body_empty),
+            (f"{root}/{aid_enc}/refresh-token", body_empty),
+            (f"{root}/{aid_enc}/refresh_token", body_empty),
+            (f"{root}/{aid_enc}/token/refresh", body_empty),
+            (f"{root}/{aid_enc}/relogin", body_empty),
+            (f"{root}/refresh", body_id),
+            (f"{root}/refresh-token", body_id),
+            (f"{root}/refresh_token", body_id),
+            (f"{root}/token/refresh", body_id),
+        ]
+        get_candidates: list[str] = [
+            f"{root}/{aid_enc}/refresh",
+            f"{root}/{aid_enc}/refresh-token",
+            f"{root}/{aid_enc}/refresh_token",
+        ]
+
+        last_detail = ""
+
+        for url, body in post_candidates:
+            code, text = _http_post_json(
+                url,
+                body,
+                {
+                    "Accept": "application/json",
+                    "Authorization": auth,
+                    "Content-Type": "application/json",
+                },
+                verify_ssl=verify_ssl,
+                timeout=90,
+                proxy=proxy_arg,
+            )
+            ok_refresh, detail = self._refresh_api_success(code, text)
+            if ok_refresh:
+                return True, detail or f"POST {url} HTTP {code}", f"POST {url}"
+            if code not in {404, 405} and detail:
+                last_detail = detail
+
+        for url in get_candidates:
+            code, text = _http_get(
+                url,
+                {
+                    "Accept": "application/json",
+                    "Authorization": auth,
+                },
+                verify_ssl=verify_ssl,
+                timeout=90,
+                proxy=proxy_arg,
+            )
+            ok_refresh, detail = self._refresh_api_success(code, text)
+            if ok_refresh:
+                return True, detail or f"GET {url} HTTP {code}", f"GET {url}"
+            if code not in {404, 405} and detail:
+                last_detail = detail
+
+        if last_detail:
+            return False, last_detail, ""
+        return False, "未找到可用的 token 刷新接口", ""
+
     def _set_remote_test_state(
         self,
         account_id: str,
         *,
-        success: bool,
+        status_text: str,
         summary: str,
         duration_ms: int,
     ) -> None:
@@ -2304,7 +2934,7 @@ class RegisterService:
         aid = str(account_id).strip()
         if not aid:
             return
-        status = "成功" if success else "失败"
+        status = str(status_text or "").strip() or "失败"
         text = (summary or "-").strip()
         if len(text) > 220:
             text = text[:220] + "…"
@@ -2374,7 +3004,8 @@ class RegisterService:
             ssl_retry_limit = self._to_int(self.cfg.get("remote_test_ssl_retry"), 2, 0, 5)
 
             self.log(
-                f"[批量测试] 启动：总数 {total}，并发 {worker_count}，SSL 重试 {ssl_retry_limit}"
+                f"[批量测试] 启动：总数 {total}，并发 {worker_count}，"
+                f"SSL 重试 {ssl_retry_limit}"
             )
 
             q: Queue[str] = Queue()
@@ -2383,12 +3014,15 @@ class RegisterService:
 
             state_lock = threading.Lock()
 
-            def _run_one(aid: str) -> tuple[bool, str, int]:
+            def _run_one(aid: str) -> tuple[bool, str, int, str]:
                 t0 = time.time()
                 success = False
                 summary = ""
+                status_text = "失败"
 
-                for attempt in range(ssl_retry_limit + 1):
+                ssl_retry_done = 0
+
+                while True:
                     success = False
                     summary = ""
                     try:
@@ -2434,21 +3068,40 @@ class RegisterService:
                         success = False
 
                     if success:
+                        summary = "测试通过"
+                        status_text = "成功"
                         break
-                    if attempt >= ssl_retry_limit:
+
+                    if self._is_account_deactivated_error(summary):
+                        status_text = "封禁"
+                        summary = "账号封禁(deactivated)"
+                        break
+
+                    if self._is_rate_limited_error(summary):
+                        status_text = "429限流"
+                        summary = "429 限流"
+                        break
+
+                    if self._is_token_invalidated_error(summary):
+                        status_text = "Token过期"
+                        summary = "Token 过期/失效"
+                        break
+
+                    if ssl_retry_done >= ssl_retry_limit:
                         break
                     if not self._is_ssl_retryable_error(summary):
                         break
 
-                    wait = round(0.8 * (attempt + 1), 2)
+                    ssl_retry_done += 1
+                    wait = round(0.8 * ssl_retry_done, 2)
                     self.log(
                         f"[批量测试] id={aid} SSL/TLS 异常，"
-                        f"{wait}s 后重试 ({attempt + 1}/{ssl_retry_limit})"
+                        f"{wait}s 后重试 ({ssl_retry_done}/{ssl_retry_limit})"
                     )
                     time.sleep(wait)
 
                 cost_ms = int((time.time() - t0) * 1000)
-                return success, summary, cost_ms
+                return success, summary, cost_ms, status_text
 
             def _worker(worker_no: int) -> None:
                 nonlocal ok, fail
@@ -2459,10 +3112,10 @@ class RegisterService:
                         return
 
                     self.log(f"[批量测试-W{worker_no}] 开始 id={aid}")
-                    success, summary, cost_ms = _run_one(aid)
+                    success, summary, cost_ms, status_text = _run_one(aid)
                     self._set_remote_test_state(
                         aid,
-                        success=success,
+                        status_text=status_text,
                         summary=summary,
                         duration_ms=cost_ms,
                     )
@@ -2521,6 +3174,120 @@ class RegisterService:
         finally:
             with self._lock:
                 self._remote_test_busy = False
+
+    def revive_remote_tokens(self, ids: list[Any]) -> dict[str, Any]:
+        """批量刷新所选账号 token（用于 Token 过期复活）。"""
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in ids:
+            aid = str(raw).strip()
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            ordered_ids.append(aid)
+        if not ordered_ids:
+            raise ValueError("请先选择要复活的账号")
+
+        with self._lock:
+            if self._remote_busy:
+                raise RuntimeError("服务端列表拉取中，请稍后再试")
+            if self._remote_test_busy:
+                raise RuntimeError("批量测试进行中，请稍后再试")
+            state_by_id = {
+                str(r.get("id") or "").strip(): str(r.get("test_status") or "").strip()
+                for r in self._remote_rows
+            }
+
+        candidates = [aid for aid in ordered_ids if state_by_id.get(aid) == "Token过期"]
+        skipped = [aid for aid in ordered_ids if aid not in set(candidates)]
+        if not candidates:
+            raise ValueError("所选账号中没有“Token过期”状态")
+
+        tok = str(self.cfg.get("accounts_sync_bearer_token") or "").strip()
+        base = str(self.cfg.get("accounts_list_api_base") or "").strip()
+        if not tok:
+            raise ValueError("请先填写 Bearer Token")
+        if not base:
+            raise ValueError("请先填写账号列表 API")
+
+        verify_ssl = bool(self.cfg.get("openai_ssl_verify", True))
+        proxy_arg = str(self.cfg.get("proxy") or "").strip() or None
+        auth = tok if tok.lower().startswith("bearer ") else f"Bearer {tok}"
+        worker_count = min(
+            len(candidates),
+            self._to_int(self.cfg.get("remote_revive_concurrency"), 4, 1, 12),
+        )
+
+        self.log(
+            f"[复活] 启动：候选 {len(candidates)}，并发 {worker_count}"
+            + (f"，跳过 {len(skipped)}" if skipped else "")
+        )
+
+        ok = 0
+        fail = 0
+        state_lock = threading.Lock()
+        api_used: dict[str, int] = {}
+        results: list[dict[str, Any]] = []
+
+        def _run_one(aid: str) -> dict[str, Any]:
+            refreshed, detail, api = self._try_refresh_remote_token(
+                aid,
+                base=base,
+                auth=auth,
+                verify_ssl=verify_ssl,
+                proxy_arg=proxy_arg,
+            )
+            if refreshed:
+                self._set_remote_test_state(
+                    aid,
+                    status_text="已复活",
+                    summary="Token已刷新",
+                    duration_ms=0,
+                )
+                self.log(
+                    f"[复活] id={aid} 成功"
+                    + (f" · 接口 {api}" if api else "")
+                    + (f" · {detail}" if detail else "")
+                )
+                return {"id": aid, "success": True, "detail": detail, "api": api}
+
+            self.log(f"[复活] id={aid} 失败: {detail}")
+            return {"id": aid, "success": False, "detail": detail, "api": api}
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(_run_one, aid): aid for aid in candidates}
+            for fut in as_completed(future_map):
+                aid = future_map[fut]
+                try:
+                    item = fut.result()
+                except Exception as e:
+                    item = {"id": aid, "success": False, "detail": str(e), "api": ""}
+
+                with state_lock:
+                    results.append(item)
+                    if item.get("success"):
+                        ok += 1
+                        api = str(item.get("api") or "").strip()
+                        if api:
+                            api_used[api] = int(api_used.get(api, 0)) + 1
+                    else:
+                        fail += 1
+
+        results.sort(key=lambda x: ordered_ids.index(str(x.get("id") or "")))
+        api_summary = [
+            {"api": k, "count": int(v)}
+            for k, v in sorted(api_used.items(), key=lambda x: (-int(x[1]), str(x[0])))
+        ]
+        self.log(f"[复活] 结束：成功 {ok}，失败 {fail}")
+        return {
+            "ok": ok,
+            "fail": fail,
+            "total": len(candidates),
+            "skipped": skipped,
+            "api_summary": api_summary,
+            "concurrency": worker_count,
+            "results": results,
+        }
 
     def delete_remote_accounts(self, ids: list[Any]) -> dict[str, Any]:
         """批量删除远端账号。"""

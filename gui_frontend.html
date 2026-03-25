@@ -59,6 +59,16 @@
       box-shadow: 0 16px 44px var(--shadow);
     }
 
+    .main-right-layout {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+
     .sider {
       background: linear-gradient(180deg, #111a29, #0c1320 72%, #0a111b);
       border-right: 1px solid var(--line);
@@ -126,24 +136,46 @@
       font-size: 12px;
     }
 
+    .run-metrics {
+      grid-column: 1 / 3;
+      margin-top: -2px;
+      font-size: 12px;
+      color: #9fb3c8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .content {
-      height: calc(100vh - 106px);
+      flex: 1;
+      min-height: 0;
       padding: 12px;
       overflow: hidden;
     }
 
-    .tab-page {
+    .content-inner-scroll {
       height: 100%;
       min-height: 0;
-      overflow: auto;
-      display: grid;
-      gap: 12px;
-      align-content: start;
       padding-right: 2px;
     }
 
-    .log-page {
+    .content-inner-scroll .n-scrollbar-container {
+      height: 100%;
+      min-height: 0;
+    }
+
+    .tab-page {
       min-height: 100%;
+      overflow: hidden;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .log-page {
+      height: 100%;
+      min-height: 100%;
+      overflow: hidden;
       align-content: stretch;
     }
 
@@ -280,6 +312,12 @@
       padding: 0 4px;
     }
 
+    .domain-chip-badge-ok {
+      background: rgba(69, 212, 175, 0.92);
+      color: #06231a;
+      font-weight: 700;
+    }
+
     .mail-split-grid {
       grid-template-columns: 1fr;
     }
@@ -335,12 +373,99 @@
       overflow: hidden;
     }
 
+    .json-note-cell {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-0 > td,
+    .account-table .n-data-table-tr.row-file-tone-0 > td {
+      background: rgba(62, 166, 255, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-1 > td,
+    .account-table .n-data-table-tr.row-file-tone-1 > td {
+      background: rgba(69, 212, 175, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-2 > td,
+    .account-table .n-data-table-tr.row-file-tone-2 > td {
+      background: rgba(247, 178, 103, 0.09);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-3 > td,
+    .account-table .n-data-table-tr.row-file-tone-3 > td {
+      background: rgba(244, 107, 120, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-4 > td,
+    .account-table .n-data-table-tr.row-file-tone-4 > td {
+      background: rgba(163, 125, 255, 0.09);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-5 > td,
+    .account-table .n-data-table-tr.row-file-tone-5 > td {
+      background: rgba(96, 170, 115, 0.1);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-6 > td,
+    .account-table .n-data-table-tr.row-file-tone-6 > td {
+      background: rgba(86, 125, 255, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-7 > td,
+    .account-table .n-data-table-tr.row-file-tone-7 > td {
+      background: rgba(86, 193, 207, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-8 > td,
+    .account-table .n-data-table-tr.row-file-tone-8 > td {
+      background: rgba(186, 123, 206, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-9 > td,
+    .account-table .n-data-table-tr.row-file-tone-9 > td {
+      background: rgba(255, 154, 118, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-10 > td,
+    .account-table .n-data-table-tr.row-file-tone-10 > td {
+      background: rgba(121, 201, 168, 0.08);
+    }
+
+    .json-table .n-data-table-tr.row-file-tone-11 > td,
+    .account-table .n-data-table-tr.row-file-tone-11 > td {
+      background: rgba(137, 176, 255, 0.08);
+    }
+
     .remote-table .n-data-table-tr.row-dup-strong > td {
       background: rgba(244, 107, 120, 0.16) !important;
     }
 
     .remote-table .n-data-table-tr.row-test-fail > td {
       box-shadow: inset 0 0 0 1px rgba(247, 178, 103, 0.45);
+    }
+
+    .remote-table .n-data-table-tr.row-test-ban > td {
+      box-shadow: inset 0 0 0 1px rgba(244, 107, 120, 0.66);
+      background: rgba(244, 107, 120, 0.1);
+    }
+
+    .remote-table .n-data-table-tr.row-test-token > td {
+      box-shadow: inset 0 0 0 1px rgba(247, 178, 103, 0.62);
+      background: rgba(247, 178, 103, 0.08);
+    }
+
+    .remote-table .n-data-table-tr.row-test-429 > td {
+      box-shadow: inset 0 0 0 1px rgba(62, 166, 255, 0.66);
+      background: rgba(62, 166, 255, 0.08);
+    }
+
+    .remote-table .n-data-table-tr.row-test-revived > td {
+      box-shadow: inset 0 0 0 1px rgba(69, 212, 175, 0.66);
+      background: rgba(69, 212, 175, 0.07);
     }
 
     .meta {
@@ -350,13 +475,23 @@
     }
 
     .log-card {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
       border: 1px solid rgba(86, 107, 132, 0.5);
       background: var(--card-soft);
     }
 
+    .log-card .n-card__content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
     .log-scroll {
-      height: calc(100vh - 220px);
-      min-height: 520px;
+      flex: 1;
+      min-height: 260px;
     }
 
     .log-view {
@@ -370,16 +505,14 @@
       padding: 6px 4px 14px;
     }
 
-    .content::-webkit-scrollbar,
-    .tab-page::-webkit-scrollbar,
+    .content-inner-scroll .n-scrollbar-container::-webkit-scrollbar,
     .log-scroll .n-scrollbar-container::-webkit-scrollbar,
     body::-webkit-scrollbar {
       width: 10px;
       height: 10px;
     }
 
-    .content::-webkit-scrollbar-thumb,
-    .tab-page::-webkit-scrollbar-thumb,
+    .content-inner-scroll .n-scrollbar-container::-webkit-scrollbar-thumb,
     .log-scroll .n-scrollbar-container::-webkit-scrollbar-thumb,
     body::-webkit-scrollbar-thumb {
       background: rgba(91, 114, 142, 0.56);
@@ -387,8 +520,7 @@
       border: 2px solid rgba(7, 11, 18, 0.8);
     }
 
-    .content::-webkit-scrollbar-track,
-    .tab-page::-webkit-scrollbar-track,
+    .content-inner-scroll .n-scrollbar-container::-webkit-scrollbar-track,
     .log-scroll .n-scrollbar-container::-webkit-scrollbar-track,
     body::-webkit-scrollbar-track {
       background: rgba(13, 20, 32, 0.4);
@@ -419,33 +551,31 @@
 
     @media (max-width: 860px) {
       body {
-        overflow: auto;
+        overflow: hidden;
       }
 
       .page-wrap {
         padding: 0;
-        height: auto;
+        height: 100vh;
       }
 
       .main-layout {
         border-radius: 0;
-        height: auto;
+        height: 100vh;
         min-height: 100vh;
       }
 
       .content {
-        height: auto;
         padding: 10px;
-        overflow: visible;
+        overflow: hidden;
       }
 
       .tab-page {
-        overflow: visible;
+        overflow: hidden;
       }
 
       .log-scroll {
-        height: 420px;
-        min-height: 420px;
+        min-height: 320px;
       }
 
     }
@@ -656,7 +786,15 @@
           progress: 0,
           sync_busy: false,
           remote_busy: false,
-          remote_test_busy: false
+          remote_test_busy: false,
+          run_planned_total: 0,
+          run_success_count: 0,
+          run_retry_total: 0,
+          run_success_rate: 100,
+          run_last_retry_reason: "",
+          run_retry_reasons_top: [],
+          run_elapsed_sec: 0,
+          run_avg_success_sec: 0
         });
 
         const dashForm = Vue.reactive({
@@ -704,6 +842,7 @@
           sync: false,
           remote: false,
           remote_test: false,
+          remote_revive: false,
           remote_delete: false,
           logs: false,
           mail_overview: false,
@@ -717,6 +856,8 @@
 
         const jsonRows = Vue.ref([]);
         const jsonSelection = Vue.ref([]);
+        const jsonNoteDraft = Vue.reactive({});
+        const jsonNoteSaving = Vue.reactive({});
         const jsonInfo = Vue.reactive({ file_count: 0, account_total: 0 });
 
         const accountRows = Vue.ref([]);
@@ -761,10 +902,12 @@
           email_total: 0
         });
         const mailDomainErrors = Vue.reactive({});
+        const mailDomainRegistered = Vue.reactive({});
         const showMailModal = Vue.ref(false);
 
         const logLines = Vue.ref([]);
         const logSince = Vue.ref(0);
+        const logScrollbarRef = Vue.ref(null);
 
         let pollTimer = null;
         let pollTick = 0;
@@ -784,6 +927,30 @@
           if (status.running) return "success";
           if ((status.status_text || "").includes("停止")) return "warning";
           return "default";
+        });
+
+        const runSuccessRateText = Vue.computed(() => {
+          const rate = Number(status.run_success_rate || 100);
+          const retry = Number(status.run_retry_total || 0);
+          const success = Number(status.run_success_count || 0);
+          const planned = Number(status.run_planned_total || 0);
+          const elapsed = Number(status.run_elapsed_sec || 0);
+          const avgSec = Number(status.run_avg_success_sec || 0);
+          const plannedText = planned > 0 ? `${success}/${planned}` : `${success}`;
+          return `成功率 ${rate.toFixed(2)}% · 成功 ${plannedText} · 重试 ${retry} 次 · 总耗时 ${elapsed.toFixed(1)}s · 平均 ${avgSec.toFixed(1)}s`;
+        });
+
+        const runRetryReasonText = Vue.computed(() => {
+          const retry = Number(status.run_retry_total || 0);
+          if (retry <= 0) return "重试原因：无";
+          const rows = Array.isArray(status.run_retry_reasons_top)
+            ? status.run_retry_reasons_top
+            : [];
+          const txt = rows
+            .map((x) => `${String((x && x.reason) || "未知")}×${Number((x && x.count) || 0)}`)
+            .join("；");
+          if (txt) return `重试原因：${txt}`;
+          return `重试原因：${String(status.run_last_retry_reason || "未知")}`;
         });
 
         const remoteInfoText = Vue.computed(() => {
@@ -827,7 +994,11 @@
           const selectedDomains = Array.isArray(settingsForm.mail_domain_allowlist)
             ? settingsForm.mail_domain_allowlist.length
             : 0;
-          return `服务 ${provider} · 域名 ${dom} 个 · 已选域名 ${selectedDomains} 个 · 邮箱 ${box} 个 · 当前邮件 ${em} 封`;
+          let regTotal = 0;
+          for (const dm of mailDomains.value) {
+            regTotal += Number(mailDomainRegistered[String(dm || "").toLowerCase()] || 0);
+          }
+          return `服务 ${provider} · 域名 ${dom} 个 · 已选域名 ${selectedDomains} 个 · 已注册 ${regTotal} 个 · 邮箱 ${box} 个 · 当前邮件 ${em} 封`;
         });
 
         const selectedMailLabel = Vue.computed(() => {
@@ -867,6 +1038,50 @@
           return row.key;
         }
 
+        function fileToneClass(idx) {
+          const n = Number(idx);
+          if (!Number.isFinite(n) || n < 0) return "";
+          return `row-file-tone-${Math.abs(Math.floor(n)) % 12}`;
+        }
+
+        function jsonRowClassName(row) {
+          return fileToneClass(row && row.file_color_idx);
+        }
+
+        function accountRowClassName(row) {
+          return fileToneClass(row && row.source_color_idx);
+        }
+
+        function setJsonNoteDraft(path, val) {
+          const p = String(path || "");
+          if (!p) return;
+          jsonNoteDraft[p] = String(val || "");
+        }
+
+        async function saveJsonNote(path, showSuccess = true) {
+          const p = String(path || "");
+          if (!p) return;
+          const note = String(jsonNoteDraft[p] || "").trim();
+          jsonNoteSaving[p] = true;
+          try {
+            const data = await apiRequest("/api/data/json/note", {
+              method: "POST",
+              body: { path: p, note }
+            });
+            const row = jsonRows.value.find((x) => String(x.path || "") === p);
+            if (row) row.note = String(data.note || "");
+            jsonNoteDraft[p] = String(data.note || "");
+            if (showSuccess) {
+              const fileName = row ? String(row.name || "") : String(data.name || "");
+              message.success(`备注已保存：${fileName || "JSON"}`);
+            }
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            jsonNoteSaving[p] = false;
+          }
+        }
+
         function normalizeDomainList(values) {
           if (!Array.isArray(values)) return [];
           const out = [];
@@ -884,6 +1099,14 @@
           const d = String(domain || "").trim().toLowerCase();
           if (!d) return 0;
           const raw = mailDomainErrors[d];
+          const n = Number(raw || 0);
+          return Number.isFinite(n) && n > 0 ? n : 0;
+        }
+
+        function domainRegisteredCount(domain) {
+          const d = String(domain || "").trim().toLowerCase();
+          if (!d) return 0;
+          const raw = mailDomainRegistered[d];
           const n = Number(raw || 0);
           return Number.isFinite(n) && n > 0 ? n : 0;
         }
@@ -917,9 +1140,13 @@
 
         function applyDomainStats(data) {
           const counts = (data && data.error_counts) || {};
+          const registered = (data && data.registered_counts) || {};
           const selected = normalizeDomainList((data && data.selected) || settingsForm.mail_domain_allowlist || []);
           for (const k of Object.keys(mailDomainErrors)) {
             delete mailDomainErrors[k];
+          }
+          for (const k of Object.keys(mailDomainRegistered)) {
+            delete mailDomainRegistered[k];
           }
           if (counts && typeof counts === "object") {
             for (const [k, v] of Object.entries(counts)) {
@@ -931,6 +1158,16 @@
               }
             }
           }
+          if (registered && typeof registered === "object") {
+            for (const [k, v] of Object.entries(registered)) {
+              const d = String(k || "").trim().toLowerCase();
+              if (!d) continue;
+              const n = Number(v || 0);
+              if (Number.isFinite(n) && n > 0) {
+                mailDomainRegistered[d] = n;
+              }
+            }
+          }
           if (selected.length) {
             setDomainSelection(selected);
           }
@@ -939,7 +1176,12 @@
         function remoteRowClassName(row) {
           const classes = [];
           if (row && row.is_dup) classes.push("row-dup-strong");
-          if (String((row && row.test_status) || "") === "失败") classes.push("row-test-fail");
+          const s = String((row && row.test_status) || "").trim();
+          if (s === "封禁") classes.push("row-test-ban");
+          else if (s === "Token过期") classes.push("row-test-token");
+          else if (s === "429限流") classes.push("row-test-429");
+          else if (s === "已复活") classes.push("row-test-revived");
+          else if (s && s !== "成功" && s !== "未测试" && s !== "未测") classes.push("row-test-fail");
           return classes.join(" ");
         }
 
@@ -960,7 +1202,39 @@
           { title: "文件名", key: "name", minWidth: 180, ellipsis: { tooltip: true } },
           { title: "账号数", key: "count", width: 80 },
           { title: "创建时间", key: "created", width: 168 },
-          { title: "导出时间", key: "exported", width: 168 }
+          {
+            title: "备注",
+            key: "note",
+            minWidth: 280,
+            render(row) {
+              const path = String((row && row.path) || "");
+              const value = Object.prototype.hasOwnProperty.call(jsonNoteDraft, path)
+                ? String(jsonNoteDraft[path] || "")
+                : String((row && row.note) || "");
+              const saving = !!jsonNoteSaving[path];
+              return Vue.h("div", { class: "json-note-cell" }, [
+                Vue.h(naive.NInput, {
+                  size: "small",
+                  value,
+                  clearable: true,
+                  maxlength: 120,
+                  placeholder: "输入备注",
+                  onUpdateValue: (v) => setJsonNoteDraft(path, v)
+                }),
+                Vue.h(
+                  naive.NButton,
+                  {
+                    size: "small",
+                    type: "primary",
+                    tertiary: true,
+                    loading: saving,
+                    onClick: () => saveJsonNote(path, true)
+                  },
+                  { default: () => "保存" }
+                )
+              ]);
+            }
+          }
         ];
 
         const accountColumns = [
@@ -1022,6 +1296,34 @@
                   { default: () => "成功" }
                 );
               }
+              if (s === "封禁") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "error", size: "small", bordered: false },
+                  { default: () => "封禁" }
+                );
+              }
+              if (s === "Token过期") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "warning", size: "small", bordered: false },
+                  { default: () => "Token过期" }
+                );
+              }
+              if (s === "429限流") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "info", size: "small", bordered: false },
+                  { default: () => "429" }
+                );
+              }
+              if (s === "已复活") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "success", size: "small", bordered: false },
+                  { default: () => "已复活" }
+                );
+              }
               if (s === "失败") {
                 return Vue.h(
                   naive.NTag,
@@ -1035,8 +1337,7 @@
                 { default: () => "未测" }
               );
             }
-          },
-          { title: "测试摘要", key: "test_result", minWidth: 240, ellipsis: { tooltip: true } }
+          }
         ];
 
         const mailboxColumns = [
@@ -1173,6 +1474,16 @@
           status.sync_busy = !!data.sync_busy;
           status.remote_busy = !!data.remote_busy;
           status.remote_test_busy = !!data.remote_test_busy;
+          status.run_planned_total = Number(data.run_planned_total || 0);
+          status.run_success_count = Number(data.run_success_count || 0);
+          status.run_retry_total = Number(data.run_retry_total || 0);
+          status.run_success_rate = Number(data.run_success_rate || 100);
+          status.run_last_retry_reason = String(data.run_last_retry_reason || "");
+          status.run_retry_reasons_top = Array.isArray(data.run_retry_reasons_top)
+            ? data.run_retry_reasons_top
+            : [];
+          status.run_elapsed_sec = Number(data.run_elapsed_sec || 0);
+          status.run_avg_success_sec = Number(data.run_avg_success_sec || 0);
           remoteMeta.test_total = Number(data.remote_test_total || remoteMeta.test_total || 0);
           remoteMeta.test_done = Number(data.remote_test_done || remoteMeta.test_done || 0);
           remoteMeta.test_ok = Number(data.remote_test_ok || remoteMeta.test_ok || 0);
@@ -1191,6 +1502,16 @@
               }
               if (logLines.value.length > 1600) {
                 logLines.value.splice(0, logLines.value.length - 1600);
+              }
+              await Vue.nextTick();
+              const sb = logScrollbarRef.value;
+              if (sb && typeof sb.scrollTo === "function") {
+                sb.scrollTo({ top: 10 ** 9, left: 0 });
+              } else {
+                const container = document.querySelector(".log-scroll .n-scrollbar-container");
+                if (container) {
+                  container.scrollTop = container.scrollHeight;
+                }
               }
             }
             logSince.value = Number(data.last_id || logSince.value);
@@ -1216,7 +1537,33 @@
           loading.json = true;
           try {
             const data = await apiRequest("/api/data/json");
-            jsonRows.value = Array.isArray(data.items) ? data.items : [];
+            jsonRows.value = Array.isArray(data.items)
+              ? data.items.map((x) => ({
+                path: String((x && x.path) || ""),
+                name: String((x && x.name) || ""),
+                count: Number((x && x.count) || 0),
+                created: String((x && x.created) || "-"),
+                note: String((x && x.note) || ""),
+                file_color_idx: Number((x && x.file_color_idx) || 0)
+              })).filter((x) => x.path)
+              : [];
+
+            const latestPathSet = new Set(jsonRows.value.map((x) => x.path));
+            for (const row of jsonRows.value) {
+              if (!Object.prototype.hasOwnProperty.call(jsonNoteDraft, row.path)) {
+                jsonNoteDraft[row.path] = String(row.note || "");
+              }
+              if (!Object.prototype.hasOwnProperty.call(jsonNoteSaving, row.path)) {
+                jsonNoteSaving[row.path] = false;
+              }
+            }
+            for (const key of Object.keys(jsonNoteDraft)) {
+              if (!latestPathSet.has(key)) {
+                delete jsonNoteDraft[key];
+                delete jsonNoteSaving[key];
+              }
+            }
+
             jsonInfo.file_count = Number(data.file_count || 0);
             jsonInfo.account_total = Number(data.account_total || 0);
             const allowed = new Set(jsonRows.value.map((x) => x.path));
@@ -1231,7 +1578,11 @@
           loading.accounts = true;
           try {
             const data = await apiRequest("/api/data/accounts");
-            accountRows.value = Array.isArray(data.items) ? data.items : [];
+            accountRows.value = Array.isArray(data.items)
+              ? data.items.map((x) => Object.assign({}, x, {
+                source_color_idx: Number((x && x.source_color_idx) || -1)
+              }))
+              : [];
             accountInfo.total = Number(data.total || 0);
             accountInfo.path = String(data.path || "accounts.txt");
             accountInfo.file_options = Array.isArray(data.file_options)
@@ -1307,7 +1658,10 @@
 
         function remoteSelectFailed() {
           const keys = remoteRows.value
-            .filter((row) => String(row.test_status || "") === "失败")
+            .filter((row) => {
+              const s = String(row.test_status || "").trim();
+              return s === "失败" || s === "封禁" || s === "Token过期" || s === "429限流";
+            })
             .map((row) => row.key);
           if (!keys.length) {
             message.warning("没有可选的测试失败账号");
@@ -1361,6 +1715,69 @@
             message.error(String(e.message || e));
           } finally {
             loading.remote_test = false;
+          }
+        }
+
+        async function reviveSelectedRemoteAccounts() {
+          if (!remoteSelection.value.length) {
+            message.warning("请先勾选服务端账号");
+            return;
+          }
+          loading.remote_revive = true;
+          try {
+            const keySet = new Set(remoteSelection.value);
+            const rows = remoteRows.value.filter((x) => keySet.has(x.key));
+            const ids = rows
+              .map((x) => String(x.id || "").trim())
+              .filter((x) => x);
+            if (!ids.length) {
+              message.warning("所选行缺少账号 ID");
+              return;
+            }
+
+            const tokenRows = rows.filter((x) => String(x.test_status || "").trim() === "Token过期");
+            if (!tokenRows.length) {
+              message.warning("所选账号中没有“Token过期”状态");
+              return;
+            }
+
+            const data = await apiRequest("/api/remote/revive-batch", {
+              method: "POST",
+              body: { ids: tokenRows.map((x) => String(x.id || "").trim()) }
+            });
+            await loadRemoteCache();
+
+            const ok = Number(data.ok || 0);
+            const fail = Number(data.fail || 0);
+            const apis = Array.isArray(data.api_summary)
+              ? data.api_summary.slice(0, 2)
+                .map((x) => `${String((x && x.api) || "-")}×${Number((x && x.count) || 0)}`)
+                .join("；")
+              : "";
+            if (fail === 0) {
+              message.success(
+                `复活完成：成功 ${ok}`
+                + (apis ? `；接口：${apis}` : "")
+                + `；并发 ${Number(data.concurrency || 1)}`
+              );
+            } else {
+              const errs = Array.isArray(data.results)
+                ? data.results.filter((x) => !x.success).slice(0, 3)
+                : [];
+              const detail = errs
+                .map((x) => `${String((x && x.id) || "-")}: ${String((x && x.detail) || "未知错误")}`)
+                .join("；");
+              message.warning(
+                `复活完成：成功 ${ok}，失败 ${fail}`
+                + (detail ? `；原因：${detail}` : "")
+                + (apis ? `；接口：${apis}` : "")
+                + `；并发 ${Number(data.concurrency || 1)}`
+              );
+            }
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.remote_revive = false;
           }
         }
 
@@ -1546,8 +1963,10 @@
           setDomainSelection(allow);
 
           const directCounts = (data && data.domain_error_counts) || {};
+          const directRegistered = (data && data.domain_registered_counts) || {};
           const stats = (data && data.domain_stats) || {};
           const merged = {};
+          const mergedRegistered = {};
           if (directCounts && typeof directCounts === "object") {
             for (const [k, v] of Object.entries(directCounts)) {
               const d = String(k || "").trim().toLowerCase();
@@ -1555,14 +1974,27 @@
               if (d && Number.isFinite(n) && n > 0) merged[d] = n;
             }
           }
+          if (directRegistered && typeof directRegistered === "object") {
+            for (const [k, v] of Object.entries(directRegistered)) {
+              const d = String(k || "").trim().toLowerCase();
+              const n = Number(v || 0);
+              if (d && Number.isFinite(n) && n > 0) mergedRegistered[d] = n;
+            }
+          }
           if (stats && typeof stats === "object") {
             for (const [k, v] of Object.entries(stats)) {
               const d = String(k || "").trim().toLowerCase();
               const n = Number((v && v.errors) || 0);
               if (d && Number.isFinite(n) && n > 0) merged[d] = n;
+              const reg = Number((v && v.registered) || 0);
+              if (d && Number.isFinite(reg) && reg > 0) mergedRegistered[d] = reg;
             }
           }
-          applyDomainStats({ error_counts: merged, selected: allow });
+          applyDomainStats({
+            error_counts: merged,
+            registered_counts: mergedRegistered,
+            selected: allow
+          });
 
           mailboxRows.value = Array.isArray(data.mailboxes)
             ? data.mailboxes.map((x) => ({
@@ -1596,6 +2028,7 @@
             domains: mailDomains.value,
             selected_domains: settingsForm.mail_domain_allowlist,
             domain_error_counts: mailDomainErrors,
+            domain_registered_counts: mailDomainRegistered,
             mailboxes: mailboxRows.value
           });
           mailState.loaded = false;
@@ -1805,10 +2238,28 @@
               mailState.email_total = 0;
               resetMailDetail();
             }
+            const apis = Array.isArray(data.api_summary)
+              ? data.api_summary.slice(0, 2)
+                .map((x) => `${String((x && x.api) || "-")}×${Number((x && x.count) || 0)}`)
+                .join("；")
+              : "";
             if (Number(data.fail || 0) === 0) {
-              message.success(`邮箱删除完成：成功 ${data.ok}`);
+              const msg = `邮箱删除完成：成功 ${data.ok}`
+                + (apis ? `；接口：${apis}` : "")
+                + `；并发 ${Number(data.concurrency || 1)}`;
+              message.success(msg);
             } else {
-              message.warning(`邮箱删除完成：成功 ${data.ok}，失败 ${data.fail}`);
+              const errs = Array.isArray(data.errors) ? data.errors : [];
+              const detail = errs
+                .slice(0, 3)
+                .map((x) => `${String((x && x.address) || "-")}: ${String((x && x.error) || "未知错误")}`)
+                .join("；");
+              const suffix = errs.length > 3 ? "；..." : "";
+              const msg = `邮箱删除完成：成功 ${data.ok}，失败 ${data.fail}`
+                + (detail ? `；原因：${detail}${suffix}` : "")
+                + (apis ? `；接口：${apis}` : "")
+                + `；并发 ${Number(data.concurrency || 1)}`;
+              message.warning(msg);
             }
           } catch (e) {
             message.error(String(e.message || e));
@@ -1846,7 +2297,15 @@
             if (Number(data.fail || 0) === 0) {
               message.success(`邮件删除完成：成功 ${data.ok}`);
             } else {
-              message.warning(`邮件删除完成：成功 ${data.ok}，失败 ${data.fail}`);
+              const errs = Array.isArray(data.errors) ? data.errors : [];
+              const detail = errs
+                .slice(0, 3)
+                .map((x) => `${String((x && x.id) || "-")}: ${String((x && x.error) || "未知错误")}`)
+                .join("；");
+              const suffix = errs.length > 3 ? "；..." : "";
+              const msg = `邮件删除完成：成功 ${data.ok}，失败 ${data.fail}`
+                + (detail ? `；原因：${detail}${suffix}` : "");
+              message.warning(msg);
             }
           } catch (e) {
             message.error(String(e.message || e));
@@ -1985,6 +2444,8 @@
           progressPercent,
           totalPlanCount,
           statusTagType,
+          runSuccessRateText,
+          runRetryReasonText,
           dashForm,
           settingsForm,
           loading,
@@ -2014,10 +2475,12 @@
           mailDetail,
           mailState,
           mailDomainErrors,
+          mailDomainRegistered,
           showMailModal,
           mailInfoText,
           mailDetailText,
           logText,
+          logScrollbarRef,
           flclashPolicyOptions,
           jsonColumns,
           accountColumns,
@@ -2029,9 +2492,12 @@
           rowKeyRemote,
           rowKeyMailbox,
           rowKeyMail,
+          jsonRowClassName,
+          accountRowClassName,
           isDomainSelected,
           toggleDomain,
           domainErrorCount,
+          domainRegisteredCount,
           mailboxRowProps,
           mailRowProps,
           remoteRowClassName,
@@ -2044,6 +2510,7 @@
           remoteSelectFailed,
           remoteSelectDuplicate,
           testSelectedRemoteAccounts,
+          reviveSelectedRemoteAccounts,
           deleteSelectedRemoteAccounts,
           jsonSelectAll,
           jsonSelectNone,
@@ -2079,8 +2546,8 @@
                 <n-menu :value="activeTab" :options="menuOptions" @update:value="activeTab = $event" />
               </n-layout-sider>
 
-              <n-layout>
-                <n-layout-header class="header">
+              <div class="main-right-layout">
+                <div class="header">
                   <div class="header-title">
                     <h1>注册任务面板</h1>
                     <p>保持配置、运行、数据同步在同一页面完成</p>
@@ -2091,10 +2558,13 @@
                       <span>{{ progressPercent }}%</span>
                       <n-progress type="line" :percentage="progressPercent" :show-indicator="false" />
                     </div>
+                    <div class="run-metrics" :title="runSuccessRateText">{{ runSuccessRateText }}</div>
+                    <div class="run-metrics" :title="runRetryReasonText">{{ runRetryReasonText }}</div>
                   </div>
-                </n-layout-header>
+                </div>
 
-                <n-layout-content class="content">
+                <div class="content">
+                  <n-scrollbar class="content-inner-scroll">
                   <div v-if="activeTab === 'dash'" class="tab-page">
                     <n-card class="glass-card" title="运行任务" size="small">
                     <div class="dash-grid">
@@ -2161,12 +2631,14 @@
                           <n-button class="toolbar-btn" type="error" ghost @click="deleteSelectedJson">删除已勾选</n-button>
                         </div>
                         <n-data-table
+                          class="json-table"
                           size="small"
                           table-layout="fixed"
                           :single-line="false"
                           :columns="jsonColumns"
                           :data="jsonRows"
                           :row-key="rowKeyPath"
+                          :row-class-name="jsonRowClassName"
                           v-model:checked-row-keys="jsonSelection"
                         />
                       </n-card>
@@ -2193,12 +2665,14 @@
                         </div>
                         <div class="account-table-wrap">
                           <n-data-table
+                            class="account-table"
                             size="small"
                             table-layout="fixed"
                             :single-line="false"
                             :columns="accountColumns"
                             :data="accountRows"
                             :row-key="rowKeyAccount"
+                            :row-class-name="accountRowClassName"
                             :max-height="430"
                             v-model:checked-row-keys="accountSelection"
                           />
@@ -2225,6 +2699,12 @@
                           :loading="loading.remote_test || status.remote_test_busy"
                           @click="testSelectedRemoteAccounts"
                         >批量测试已选</n-button>
+                        <n-button
+                          class="toolbar-btn"
+                          type="warning"
+                          :loading="loading.remote_revive"
+                          @click="reviveSelectedRemoteAccounts"
+                        >复活已选</n-button>
                         <n-button
                           class="toolbar-btn"
                           type="error"
@@ -2267,15 +2747,16 @@
                           type="button"
                           class="domain-chip"
                           :class="{ 'is-selected': isDomainSelected(dm), 'has-error': domainErrorCount(dm) > 0 }"
-                          :title="'registration_disallowed 次数: ' + domainErrorCount(dm)"
+                          :title="'已注册: ' + domainRegisteredCount(dm) + ' · registration_disallowed: ' + domainErrorCount(dm)"
                           @click="toggleDomain(dm)"
                         >
                           <span>{{ dm }}</span>
+                          <span v-if="domainRegisteredCount(dm) > 0" class="domain-chip-badge domain-chip-badge-ok">{{ domainRegisteredCount(dm) }}</span>
                           <span v-if="domainErrorCount(dm) > 0" class="domain-chip-badge">{{ domainErrorCount(dm) }}</span>
                         </button>
                         <span v-if="!mailDomains.length" class="meta">暂无域名，点击“保存并刷新”后加载</span>
                       </div>
-                      <div class="meta" style="margin-top: 6px">点击域名标签可启用/禁用该域名；红色角标为 registration_disallowed 次数（悬停可见）。</div>
+                      <div class="meta" style="margin-top: 6px">点击域名标签可启用/禁用该域名；绿色角标为累计注册数，红色角标为 registration_disallowed 次数（均持久化保存）。</div>
                     </n-card>
 
                     <div class="split-grid mail-split-grid">
@@ -2456,13 +2937,14 @@
                           <n-button size="small" @click="clearLogs">清空</n-button>
                         </n-space>
                       </template>
-                      <n-scrollbar class="log-scroll">
+                      <n-scrollbar ref="logScrollbarRef" class="log-scroll">
                         <pre class="log-view">{{ logText || '暂无日志' }}</pre>
                       </n-scrollbar>
                     </n-card>
                   </div>
-                </n-layout-content>
-              </n-layout>
+                  </n-scrollbar>
+                </div>
+              </div>
             </n-layout>
           </div>
         </n-config-provider>

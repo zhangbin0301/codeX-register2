@@ -1251,6 +1251,24 @@ def run(proxy: Optional[str]):
 
     s = requests.Session(proxies=proxies, impersonate="safari")
 
+    def _fail(password: str = "", code: str = "", message: str = "", extra: Dict[str, Any] | None = None):
+        meta: Dict[str, Any] = {}
+        if code:
+            meta["error_code"] = str(code).strip().lower()
+        if message:
+            meta["error_message"] = str(message).strip()[:220]
+        if email_domain:
+            meta["email_domain"] = email_domain
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if v is not None:
+                    meta[str(k)] = v
+        if meta:
+            return None, password, meta
+        return None, password
+
+    email_domain = ""
+
     if not _skip_net_check():
         try:
             trace = _session_get_with_tls_retry(
@@ -1267,11 +1285,11 @@ def run(proxy: Optional[str]):
                 raise RuntimeError("当前出口地区不可用，请更换代理")
         except Exception as e:
             _err(f"网络/地区检测失败: {e}")
-            return None, ""
+            return _fail("", "net_check_failed", str(e))
 
     email, dev_token = get_email_and_token(proxies)
     if not email or not dev_token:
-        return None, ""
+        return _fail("", "mailbox_init_failed", "临时邮箱或会话获取失败")
     email_domain = _email_domain(email)
     _info(f"临时邮箱: {email}")
     masked = (dev_token[:8] + "…") if dev_token else ""
@@ -1331,7 +1349,7 @@ def run(proxy: Optional[str]):
             return "retry_403", ""
         if signup_status != 200:
             _err(f"注册表单失败 HTTP {signup_status}: {signup_resp.text[:400]}")
-            return None, ""
+            return _fail("", "auth_continue_failed", f"HTTP {signup_status}")
 
         password = _generate_password()
         register_body = json.dumps({"password": password, "username": email})
@@ -1352,7 +1370,7 @@ def run(proxy: Optional[str]):
         _info(f"user/register HTTP {pwd_resp.status_code}")
         if pwd_resp.status_code != 200:
             _err(f"user/register 失败: {pwd_resp.text[:400]}")
-            return None, ""
+            return _fail("", "register_password_failed", f"HTTP {pwd_resp.status_code}")
 
         try:
             register_json = pwd_resp.json()
@@ -1397,7 +1415,7 @@ def run(proxy: Optional[str]):
 
             code = get_oai_code(dev_token, email, proxies)
             if not code:
-                return None, password
+                return _fail(password, "otp_timeout", "未收到验证码")
 
             _info("校验注册邮箱 OTP")
             code_resp = _post_with_retry(
@@ -1417,7 +1435,7 @@ def run(proxy: Optional[str]):
             _info(f"OTP 校验 HTTP {code_resp.status_code}")
             if code_resp.status_code != 200:
                 _err(f"OTP 校验失败: {code_resp.text[:400]}")
-                return None, password
+                return _fail(password, "otp_validate_failed", f"HTTP {code_resp.status_code}")
             else:
                 try:
                     cu = (code_resp.json() or {}).get("continue_url") or ""
@@ -1485,7 +1503,7 @@ def run(proxy: Optional[str]):
                         "error_code": "registration_disallowed",
                     },
                 )
-            return None, password
+            return _fail(password, "create_account_failed", f"HTTP {create_account_status}")
 
         try:
             create_json = create_account_resp.json() or {}
@@ -1609,7 +1627,16 @@ def run(proxy: Optional[str]):
 
     except Exception as e:
         _err(f"运行异常: {e}")
-        return None, ""
+        emsg = str(e)
+        low = emsg.lower()
+        is_tls = (
+            "ssl" in low
+            or "tls" in low
+            or "handshake" in low
+            or "wrong version number" in low
+            or "certificate" in low
+        )
+        return _fail("", "tls_error" if is_tls else "runtime_exception", emsg)
 
 
 def main() -> None:

@@ -404,17 +404,57 @@ class MailFreeService(MailServiceBase):
         target = str(address or "").strip()
         if not target:
             raise MailServiceError("邮箱地址不能为空")
-        path = f"/api/mailbox/{urllib.parse.quote(target, safe='')}"
-        resp = self._request("DELETE", path, need_auth=True, timeout=20, proxies=proxies)
-        if not (200 <= int(resp.status_code or 0) < 300):
-            raise MailServiceError(
-                f"删除邮箱失败 HTTP {resp.status_code}: {_safe_text(resp.text)}"
-            )
 
+        def _payload_fail_reason(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+
+            if payload.get("success") is False:
+                return str(payload.get("message") or payload.get("error") or "删除邮箱失败")
+
+            if "code" in payload:
+                try:
+                    cval = int(payload.get("code") or 0)
+                except Exception:
+                    cval = -1
+                if cval != 0:
+                    return str(payload.get("message") or payload.get("error") or f"code={cval}")
+
+            data = payload.get("data")
+            if isinstance(data, dict) and data.get("success") is False:
+                return str(data.get("message") or data.get("error") or "删除邮箱失败")
+
+            return ""
+
+
+        method = "DELETE"
+        path = "/api/mailboxes"
+        resp = self._request(
+            method,
+            path,
+            params={"address": target},
+            need_auth=True,
+            timeout=20,
+            proxies=proxies,
+        )
+        code = int(resp.status_code or 0)
         payload = self._json_or_none(resp)
-        if isinstance(payload, dict) and payload.get("success") is False:
-            raise MailServiceError(str(payload.get("message") or "删除邮箱失败"))
-        return {"success": True, "address": target}
+
+        if 200 <= code < 300:
+            fail_reason = _payload_fail_reason(payload)
+            if fail_reason:
+                raise MailServiceError(f"删除邮箱失败: {fail_reason}")
+            return {
+                "success": True,
+                "address": target,
+                "api_method": method,
+                "api_path": path,
+            }
+
+        snippet = _safe_text(resp.text)
+        if code == 404:
+            raise MailServiceError("删除邮箱失败 HTTP 404: 未找到 API 路径 /api/mailboxes")
+        raise MailServiceError(f"删除邮箱失败 HTTP {code}: {snippet}")
 
     @staticmethod
     def _sender_text(raw_from: Any) -> str:
