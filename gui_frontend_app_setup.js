@@ -97,8 +97,15 @@
           mail_service_provider: "mailfree",
           mail_domain_allowlist: [],
           worker_domain: "",
+          mail_domains: "",
           freemail_username: "",
           freemail_password: "",
+          cf_temp_admin_auth: "",
+          cloudmail_api_url: "",
+          cloudmail_admin_email: "",
+          cloudmail_admin_password: "",
+          mail_curl_api_base: "",
+          mail_curl_key: "",
           graph_accounts_file: "",
           graph_tenant: "common",
           graph_fetch_mode: "graph_api",
@@ -228,7 +235,28 @@
         const showMailModal = Vue.ref(false);
         const graphFileInputRef = Vue.ref(null);
         const mailViewCache = Vue.reactive({
+          cloudflare_temp_email: {
+            domains: [],
+            mailboxRows: [],
+            selectedMailbox: "",
+            mailRows: [],
+            mailTotal: 0
+          },
           mailfree: {
+            domains: [],
+            mailboxRows: [],
+            selectedMailbox: "",
+            mailRows: [],
+            mailTotal: 0
+          },
+          cloudmail: {
+            domains: [],
+            mailboxRows: [],
+            selectedMailbox: "",
+            mailRows: [],
+            mailTotal: 0
+          },
+          mail_curl: {
             domains: [],
             mailboxRows: [],
             selectedMailbox: "",
@@ -543,7 +571,13 @@
           const localPart = `${safePrefix}${previewRandomSuffix(randomLen)}` || "example";
 
           const allow = normalizeDomainList(settingsForm.mail_domain_allowlist || []);
-          const sourceDomains = allow.length ? allow : mailDomains.value;
+          const cfgDomains = String(settingsForm.mail_domains || "")
+            .split(/[\n\r,;\s]+/)
+            .map((x) => String(x || "").trim().toLowerCase())
+            .filter((x) => !!x);
+          const sourceDomains = allow.length
+            ? allow
+            : (mailDomains.value.length ? mailDomains.value : cfgDomains);
           const domain = sourceDomains.length ? String(sourceDomains[0] || "") : "domain.example";
           const domainMode = settingsForm.mailfree_random_domain
             ? `随机域名${sourceDomains.length > 1 ? `(${sourceDomains.length}个)` : ""}`
@@ -779,8 +813,13 @@
 
         function normalizeMailProvider(raw) {
           const val = String(raw || "mailfree").trim().toLowerCase();
+          if (["cloudflare_temp_email", "cloudflare-temp-email", "cf_temp", "gptmail", "worker_api"].includes(val)) {
+            return "cloudflare_temp_email";
+          }
+          if (["cloudmail", "cloud_mail"].includes(val)) return "cloudmail";
+          if (["mail_curl", "mailcurl", "curl_mail"].includes(val)) return "mail_curl";
           if (val === "graph") return "graph";
-          if (val === "gmail") return "gmail";
+          if (val === "gmail" || val === "imap") return "gmail";
           return "mailfree";
         }
 
@@ -1034,8 +1073,15 @@
           mailProviderTab.value = settingsForm.mail_service_provider;
           settingsForm.mail_domain_allowlist = normalizeDomainList(cfg.mail_domain_allowlist || []);
           settingsForm.worker_domain = String(cfg.worker_domain || "");
+          settingsForm.mail_domains = String(cfg.mail_domains || "");
           settingsForm.freemail_username = String(cfg.freemail_username || "");
           settingsForm.freemail_password = String(cfg.freemail_password || "");
+          settingsForm.cf_temp_admin_auth = String(cfg.cf_temp_admin_auth || "");
+          settingsForm.cloudmail_api_url = String(cfg.cloudmail_api_url || "");
+          settingsForm.cloudmail_admin_email = String(cfg.cloudmail_admin_email || "");
+          settingsForm.cloudmail_admin_password = String(cfg.cloudmail_admin_password || "");
+          settingsForm.mail_curl_api_base = String(cfg.mail_curl_api_base || "");
+          settingsForm.mail_curl_key = String(cfg.mail_curl_key || "");
           settingsForm.graph_accounts_file = String(cfg.graph_accounts_file || "");
           settingsForm.graph_tenant = String(cfg.graph_tenant || "common");
           settingsForm.graph_fetch_mode = String(cfg.graph_fetch_mode || "graph_api");
@@ -1098,8 +1144,15 @@
             mail_service_provider: normalizeMailProvider(settingsForm.mail_service_provider || "mailfree"),
             mail_domain_allowlist: normalizeDomainList(settingsForm.mail_domain_allowlist || []),
             worker_domain: String(settingsForm.worker_domain || "").trim(),
+            mail_domains: String(settingsForm.mail_domains || "").trim(),
             freemail_username: String(settingsForm.freemail_username || "").trim(),
             freemail_password: String(settingsForm.freemail_password || "").trim(),
+            cf_temp_admin_auth: String(settingsForm.cf_temp_admin_auth || "").trim(),
+            cloudmail_api_url: String(settingsForm.cloudmail_api_url || "").trim(),
+            cloudmail_admin_email: String(settingsForm.cloudmail_admin_email || "").trim(),
+            cloudmail_admin_password: String(settingsForm.cloudmail_admin_password || "").trim(),
+            mail_curl_api_base: String(settingsForm.mail_curl_api_base || "").trim(),
+            mail_curl_key: String(settingsForm.mail_curl_key || "").trim(),
             graph_accounts_file: String(settingsForm.graph_accounts_file || "").trim(),
             graph_tenant: String(settingsForm.graph_tenant || "common").trim(),
             graph_fetch_mode: String(settingsForm.graph_fetch_mode || "graph_api").trim(),
@@ -2598,7 +2651,11 @@
             ) {
               await loadRemoteCache();
             }
-            if (activeTab.value === "mail" && mailProviderTab.value === "mailfree" && pollTick % 6 === 0) {
+            if (
+              activeTab.value === "mail"
+              && ["mailfree", "cloudflare_temp_email", "cloudmail"].includes(normalizeMailProvider(mailProviderTab.value))
+              && pollTick % 6 === 0
+            ) {
               await loadMailDomainStats();
             }
             if (activeTab.value === "sms" && pollTick % 6 === 0) {

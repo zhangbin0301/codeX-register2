@@ -281,7 +281,16 @@
                         :value="mailProviderTab"
                         @update:value="updateMailProviderByTab"
                       >
+                        <n-tab-pane name="cloudflare_temp_email" tab="Cloudflare Temp">
+                          <span style="display:none"></span>
+                        </n-tab-pane>
                         <n-tab-pane name="mailfree" tab="MailFree">
+                          <span style="display:none"></span>
+                        </n-tab-pane>
+                        <n-tab-pane name="cloudmail" tab="CloudMail">
+                          <span style="display:none"></span>
+                        </n-tab-pane>
+                        <n-tab-pane name="mail_curl" tab="Mail-Curl">
                           <span style="display:none"></span>
                         </n-tab-pane>
                         <n-tab-pane name="gmail" tab="Gmail IMAP">
@@ -294,10 +303,10 @@
                       <div class="toolbar mail-top-toolbar">
                         <n-button class="toolbar-btn" :loading="loading.mail_overview || loading.save" @click="refreshMailOverview(true)">保存并刷新</n-button>
                       </div>
-                      <div v-if="mailProviderTab === 'mailfree'" class="toolbar" style="margin-top: 10px">
-                        <n-input class="toolbar-path" v-model:value="settingsForm.worker_domain" placeholder="MailFree 服务地址" />
-                        <n-input class="toolbar-path" v-model:value="settingsForm.freemail_username" placeholder="Freemail 用户名" />
-                        <n-input class="toolbar-path" v-model:value="settingsForm.freemail_password" type="password" show-password-on="click" placeholder="Freemail 密码" />
+                      <div v-if="mailProviderTab === 'cloudflare_temp_email'" class="toolbar" style="margin-top: 10px">
+                        <n-input class="toolbar-path" v-model:value="settingsForm.worker_domain" placeholder="Cloudflare Temp Email 服务地址" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.cf_temp_admin_auth" type="password" show-password-on="click" placeholder="管理员口令（cf_temp_admin_auth）" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.mail_domains" placeholder="域名池（逗号/空格分隔）" />
                         <n-switch v-model:value="settingsForm.mailfree_random_domain" />
                         <span class="meta">随机域名</span>
                         <n-switch v-model:value="settingsForm.mailbox_custom_enabled" />
@@ -316,6 +325,58 @@
                           :step="1"
                           style="width: 140px"
                         />
+                      </div>
+                      <div v-else-if="mailProviderTab === 'mailfree'" class="toolbar" style="margin-top: 10px">
+                        <n-input class="toolbar-path" v-model:value="settingsForm.worker_domain" placeholder="MailFree 服务地址" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.freemail_username" placeholder="Freemail 用户名" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.freemail_password" type="password" show-password-on="click" placeholder="Freemail 密码" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.mail_domains" placeholder="域名池（可选，逗号/空格分隔）" />
+                        <n-switch v-model:value="settingsForm.mailfree_random_domain" />
+                        <span class="meta">随机域名</span>
+                        <n-switch v-model:value="settingsForm.mailbox_custom_enabled" />
+                        <span class="meta">自定义邮箱</span>
+                        <n-input
+                          v-if="settingsForm.mailbox_custom_enabled"
+                          class="toolbar-path"
+                          v-model:value="settingsForm.mailbox_prefix"
+                          placeholder="邮箱前缀（字母数字._-）"
+                        />
+                        <n-input-number
+                          v-if="settingsForm.mailbox_custom_enabled"
+                          v-model:value="settingsForm.mailbox_random_len"
+                          :min="0"
+                          :max="32"
+                          :step="1"
+                          style="width: 140px"
+                        />
+                      </div>
+                      <div v-else-if="mailProviderTab === 'cloudmail'" class="toolbar" style="margin-top: 10px">
+                        <n-input class="toolbar-path" v-model:value="settingsForm.cloudmail_api_url" placeholder="CloudMail API 地址" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.cloudmail_admin_email" placeholder="CloudMail 管理员邮箱" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.cloudmail_admin_password" type="password" show-password-on="click" placeholder="CloudMail 管理员密码" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.mail_domains" placeholder="域名池（逗号/空格分隔）" />
+                        <n-switch v-model:value="settingsForm.mailfree_random_domain" />
+                        <span class="meta">随机域名</span>
+                        <n-switch v-model:value="settingsForm.mailbox_custom_enabled" />
+                        <span class="meta">自定义邮箱</span>
+                        <n-input
+                          v-if="settingsForm.mailbox_custom_enabled"
+                          class="toolbar-path"
+                          v-model:value="settingsForm.mailbox_prefix"
+                          placeholder="邮箱前缀（字母数字._-）"
+                        />
+                        <n-input-number
+                          v-if="settingsForm.mailbox_custom_enabled"
+                          v-model:value="settingsForm.mailbox_random_len"
+                          :min="0"
+                          :max="32"
+                          :step="1"
+                          style="width: 140px"
+                        />
+                      </div>
+                      <div v-else-if="mailProviderTab === 'mail_curl'" class="toolbar" style="margin-top: 10px">
+                        <n-input class="toolbar-path" v-model:value="settingsForm.mail_curl_api_base" placeholder="Mail-Curl API 地址" />
+                        <n-input class="toolbar-path" v-model:value="settingsForm.mail_curl_key" type="password" show-password-on="click" placeholder="Mail-Curl Key" />
                       </div>
                       <div v-else-if="mailProviderTab === 'gmail'" class="toolbar" style="margin-top: 10px">
                         <n-input
@@ -357,7 +418,7 @@
                         <n-switch v-model:value="settingsForm.gmail_alias_mix_googlemail" />
                         <span class="meta">混用 gmail/googlemail 域名</span>
                       </div>
-                      <div v-else class="toolbar" style="margin-top: 10px">
+                      <div v-else-if="mailProviderTab === 'graph'" class="toolbar" style="margin-top: 10px">
                         <input
                           ref="graphFileInputRef"
                           type="file"
@@ -401,6 +462,15 @@
                         Gmail 必须开启 IMAP 并使用应用专用密码；支持按别名池自动生成 <code>user+tag@gmail.com</code>。
                       </div>
                       <div v-if="mailProviderTab === 'gmail'" class="meta" style="margin-top: 4px">{{ gmailAliasPreviewText }}</div>
+                      <div v-if="mailProviderTab === 'cloudflare_temp_email'" class="meta" style="margin-top: 6px">
+                        Cloudflare Temp Email 使用 <code>/admin/new_address</code> 与 <code>/admin/mails</code>，需填写管理员口令与域名池。
+                      </div>
+                      <div v-if="mailProviderTab === 'cloudmail'" class="meta" style="margin-top: 6px">
+                        CloudMail 使用管理员 token 创建邮箱并拉取邮件，域名池来自 <code>mail_domains</code>。
+                      </div>
+                      <div v-if="mailProviderTab === 'mail_curl'" class="meta" style="margin-top: 6px">
+                        Mail-Curl 通过 <code>/api/remail</code> 创建邮箱，邮件读取依赖本地邮箱-ID 映射。
+                      </div>
                       <div v-if="mailProviderTab === 'graph'" class="meta" style="margin-top: 6px">
                         文件格式要求：每行必须为 <code>邮箱----密码----client_id----令牌</code>（共 4 段，使用四个中划线分隔）。
                       </div>
@@ -410,8 +480,8 @@
                       <div v-if="mailProviderTab === 'graph'" class="meta" style="margin-top: 4px">
                         可切换“注册前预刷新 token”：关闭后可加快启动，但失效账号会在运行中再被淘汰。
                       </div>
-                      <div v-if="mailProviderTab === 'mailfree'" class="meta" style="margin-top: 6px">{{ mailboxPatternPreviewText }}</div>
-                      <div v-if="mailProviderTab === 'mailfree'" class="mail-domain-wrap">
+                      <div v-if="['mailfree','cloudflare_temp_email','cloudmail'].includes(mailProviderTab)" class="meta" style="margin-top: 6px">{{ mailboxPatternPreviewText }}</div>
+                      <div v-if="['mailfree','cloudflare_temp_email','cloudmail'].includes(mailProviderTab)" class="mail-domain-wrap">
                         <button
                           v-for="dm in mailDomains"
                           :key="dm"
@@ -427,7 +497,7 @@
                         </button>
                         <span v-if="!mailDomains.length" class="meta">暂无域名，点击“保存并刷新”后加载</span>
                       </div>
-                      <div v-if="mailProviderTab === 'mailfree'" class="meta" style="margin-top: 6px">点击域名标签可启用/禁用该域名；绿色角标为累计注册数，红色角标为 registration_disallowed 次数（均持久化保存）。</div>
+                      <div v-if="['mailfree','cloudflare_temp_email','cloudmail'].includes(mailProviderTab)" class="meta" style="margin-top: 6px">点击域名标签可启用/禁用该域名；绿色角标为累计注册数，红色角标为 registration_disallowed 次数（均持久化保存）。</div>
                     </n-card>
 
                     <div class="split-grid mail-split-grid">

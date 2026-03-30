@@ -33,8 +33,15 @@ DEFAULT_CONFIG = {
     "remote_revive_concurrency": 4,
     "mail_delete_concurrency": 4,
     "worker_domain": "",
+    "mail_domains": "",
     "freemail_username": "",
     "freemail_password": "",
+    "cf_temp_admin_auth": "",
+    "cloudmail_api_url": "",
+    "cloudmail_admin_email": "",
+    "cloudmail_admin_password": "",
+    "mail_curl_api_base": "",
+    "mail_curl_key": "",
     "mail_service_provider": "mailfree",
     "graph_accounts_file": "",
     "graph_tenant": "common",
@@ -111,9 +118,21 @@ def load_config() -> dict[str, Any]:
 
     if not cfg.get("worker_domain"):
         env = _parse_env()
+        mode = str(
+            env.get("MAIL_SERVICE_PROVIDER", env.get("EMAIL_API_MODE", "mailfree"))
+            or "mailfree"
+        ).strip()
         cfg["worker_domain"] = env.get("WORKER_DOMAIN", "") or MAILFREE_DEFAULT_BASE_URL
+        cfg["mail_domains"] = env.get("MAIL_DOMAINS", "")
         cfg["freemail_username"] = env.get("FREEMAIL_USERNAME", "")
         cfg["freemail_password"] = env.get("FREEMAIL_PASSWORD", "")
+        cfg["cf_temp_admin_auth"] = env.get("CF_TEMP_ADMIN_AUTH", env.get("ADMIN_AUTH", ""))
+        cfg["cloudmail_api_url"] = env.get("CLOUDMAIL_API_URL", env.get("CM_API_URL", ""))
+        cfg["cloudmail_admin_email"] = env.get("CLOUDMAIL_ADMIN_EMAIL", env.get("CM_ADMIN_EMAIL", ""))
+        cfg["cloudmail_admin_password"] = env.get("CLOUDMAIL_ADMIN_PASSWORD", env.get("CM_ADMIN_PASS", ""))
+        cfg["mail_curl_api_base"] = env.get("MAIL_CURL_API_BASE", env.get("MC_API_BASE", ""))
+        cfg["mail_curl_key"] = env.get("MAIL_CURL_KEY", env.get("MC_KEY", ""))
+        cfg["mail_service_provider"] = mode
         cfg["gmail_imap_user"] = env.get("GMAIL_IMAP_USER", env.get("IMAP_USER", ""))
         cfg["gmail_imap_pass"] = env.get("GMAIL_IMAP_PASS", env.get("IMAP_PASS", ""))
         cfg["gmail_alias_emails"] = env.get("GMAIL_ALIAS_EMAILS", env.get("EMAIL_LIST", ""))

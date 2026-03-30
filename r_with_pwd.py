@@ -1358,9 +1358,11 @@ def _try_verify_phone_via_hero_sms(
                 )
                 if ok_reuse:
                     _hero_sms_country_mark_success(country_id)
+                    _hero_sms_country_record_result(country_id, True, "reuse_success")
                     _hero_sms_reuse_touch(increase=True)
                     return True, next_reuse
                 last_reason = reason_reuse or "复用手机号失败"
+                _hero_sms_country_record_result(country_id, False, last_reason)
                 if _is_hero_sms_timeout_issue(last_reason):
                     switched = _hero_sms_country_mark_timeout(country_id)
                     if switched:
@@ -1422,11 +1424,13 @@ def _try_verify_phone_via_hero_sms(
             )
             if ok_new:
                 _hero_sms_country_mark_success(country_id)
+                _hero_sms_country_record_result(country_id, True, "new_success")
                 if reuse_on:
                     _hero_sms_reuse_set(activation_id, phone_number, service_code, country_id)
                     _hero_sms_reuse_touch(increase=True)
                 return True, next_new
             last_reason = reason_new or "手机验证失败"
+            _hero_sms_country_record_result(country_id, False, last_reason)
             if reuse_on and _is_hero_sms_timeout_issue(last_reason):
                 switched = _hero_sms_country_mark_timeout(country_id)
                 if switched:
@@ -1544,6 +1548,16 @@ def _email_domain(email: str) -> str:
 
 def _mail_service_signature() -> tuple[Any, ...]:
     provider = normalize_mail_provider(MAIL_SERVICE_PROVIDER)
+    mail_domains = str(os.getenv("MAIL_DOMAINS", "") or "").strip()
+    cf_temp_admin_auth = str(
+        os.getenv("CF_TEMP_ADMIN_AUTH", os.getenv("ADMIN_AUTH", ""))
+        or ""
+    )
+    cloudmail_api_url = str(os.getenv("CLOUDMAIL_API_URL", "") or "").strip()
+    cloudmail_admin_email = str(os.getenv("CLOUDMAIL_ADMIN_EMAIL", "") or "").strip()
+    cloudmail_admin_password = str(os.getenv("CLOUDMAIL_ADMIN_PASSWORD", "") or "")
+    mail_curl_api_base = str(os.getenv("MAIL_CURL_API_BASE", "") or "").strip()
+    mail_curl_key = str(os.getenv("MAIL_CURL_KEY", "") or "")
     graph_accounts_file = str(os.getenv("GRAPH_ACCOUNTS_FILE", "") or "").strip()
     graph_tenant = str(os.getenv("GRAPH_TENANT", "common") or "common").strip()
     graph_fetch_mode = str(os.getenv("GRAPH_FETCH_MODE", "graph_api") or "graph_api").strip()
@@ -1568,6 +1582,13 @@ def _mail_service_signature() -> tuple[Any, ...]:
         str(FREEMAIL_USERNAME or "").strip(),
         str(FREEMAIL_PASSWORD or ""),
         _ssl_verify(),
+        mail_domains,
+        cf_temp_admin_auth,
+        cloudmail_api_url,
+        cloudmail_admin_email,
+        cloudmail_admin_password,
+        mail_curl_api_base,
+        mail_curl_key,
         graph_accounts_file,
         graph_tenant,
         graph_fetch_mode,
@@ -1604,6 +1625,13 @@ def _get_mail_service_client():
         username,
         password,
         verify_ssl,
+        mail_domains,
+        cf_temp_admin_auth,
+        cloudmail_api_url,
+        cloudmail_admin_email,
+        cloudmail_admin_password,
+        mail_curl_api_base,
+        mail_curl_key,
         graph_accounts_file,
         graph_tenant,
         graph_fetch_mode,
@@ -1615,6 +1643,14 @@ def _get_mail_service_client():
         gmail_alias_tag_len,
         gmail_alias_mix_googlemail,
     ) = sig
+    os.environ["MAIL_DOMAINS"] = mail_domains
+    os.environ["CF_TEMP_ADMIN_AUTH"] = cf_temp_admin_auth
+    os.environ["ADMIN_AUTH"] = cf_temp_admin_auth
+    os.environ["CLOUDMAIL_API_URL"] = cloudmail_api_url
+    os.environ["CLOUDMAIL_ADMIN_EMAIL"] = cloudmail_admin_email
+    os.environ["CLOUDMAIL_ADMIN_PASSWORD"] = cloudmail_admin_password
+    os.environ["MAIL_CURL_API_BASE"] = mail_curl_api_base
+    os.environ["MAIL_CURL_KEY"] = mail_curl_key
     os.environ["GRAPH_ACCOUNTS_FILE"] = graph_accounts_file
     os.environ["GRAPH_TENANT"] = graph_tenant
     os.environ["GRAPH_FETCH_MODE"] = graph_fetch_mode
@@ -1652,8 +1688,9 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         random_domain = True
         mailbox_prefix = ""
         mailbox_random_len = 0
+        domain_capable = provider in {"mailfree", "cloudflare_temp_email", "cloudmail"}
 
-        if provider == "mailfree":
+        if domain_capable:
             allow_domains = [str(x).strip() for x in (MAIL_ALLOWED_DOMAINS or []) if str(x).strip()]
             if allow_domains:
                 _info(f"已指定注册域名 {len(allow_domains)} 个")
@@ -1685,6 +1722,8 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                     f"prefix={mailbox_prefix or '-'}"
                     f", random_len={mailbox_random_len}"
                 )
+
+        if provider == "mailfree":
             try:
                 domains = client.list_domains(proxies=proxies)
             except Exception:
@@ -1731,8 +1770,32 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                 _warn("指定域名均不可用，将由服务端默认域名策略兜底")
             else:
                 _warn("mailfree 未返回可用域名列表，将由服务端默认域名策略兜底")
+        elif provider == "cloudflare_temp_email":
+            cfg_domains = [
+                x
+                for x in re.split(r"[\n\r,;\s]+", str(os.getenv("MAIL_DOMAINS", "") or ""))
+                if str(x or "").strip()
+            ]
+            _info(
+                "Cloudflare Temp Email 模式："
+                f"可选域名 {len(cfg_domains)} 个，"
+                f"随机域名={'开' if random_domain else '关'}"
+            )
+        elif provider == "cloudmail":
+            cfg_domains = [
+                x
+                for x in re.split(r"[\n\r,;\s]+", str(os.getenv("MAIL_DOMAINS", "") or ""))
+                if str(x or "").strip()
+            ]
+            _info(
+                "CloudMail 模式："
+                f"可选域名 {len(cfg_domains)} 个，"
+                f"随机域名={'开' if random_domain else '关'}"
+            )
         elif provider == "graph":
             _info("Graph 模式：忽略 MailFree 域名/前缀规则，直接从账号池取邮箱")
+        elif provider == "mail_curl":
+            _info("Mail-Curl 模式：按邮箱 ID 轮询收件")
         else:
             _info("Gmail 模式：通过 IMAP 别名池接码，忽略 MailFree 域名规则")
 
@@ -2080,6 +2143,10 @@ def _extract_next_url(data: Dict[str, Any]) -> str:
         "email_otp_verification": "https://auth.openai.com/email-verification",
         "sign_in_with_chatgpt_codex_consent": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
         "workspace": "https://auth.openai.com/workspace",
+        "add_phone": "https://auth.openai.com/add-phone",
+        "phone_verification": "https://auth.openai.com/add-phone",
+        "phone_otp_verification": "https://auth.openai.com/add-phone",
+        "phone_number_verification": "https://auth.openai.com/add-phone",
     }
     return mapping.get(page_type, "")
 
@@ -2088,7 +2155,72 @@ def _is_add_phone_url(url: str) -> bool:
     u = str(url or "").strip().lower()
     if not u:
         return False
-    return ("/add-phone" in u) or ("add_phone" in u)
+    return (
+        ("/add-phone" in u)
+        or ("add_phone" in u)
+        or ("/phone-verification" in u)
+        or ("phone_verification" in u)
+    )
+
+
+def _is_add_phone_page(page_type: str) -> bool:
+    p = str(page_type or "").strip().lower().replace("-", "_")
+    if not p:
+        return False
+    if p in {
+        "add_phone",
+        "phone_verification",
+        "phone_otp_verification",
+        "phone_number_verification",
+    }:
+        return True
+    return "phone" in p and ("add" in p or "verification" in p)
+
+
+def _handle_add_phone_challenge(
+    session: requests.Session,
+    *,
+    current_url: str,
+    proxies: Any,
+    email: str,
+    hint_url: str = "",
+    scene: str = "",
+    mark_bad_email_on_fail: bool = True,
+) -> tuple[bool, str, str]:
+    resolved_current = str(current_url or "").strip()
+    resolved_hint = str(hint_url or "").strip()
+    target = resolved_current or resolved_hint
+    if not _is_add_phone_url(target):
+        return True, resolved_current, ""
+
+    label = str(scene or "").strip()
+    if label:
+        _info(f"{label}命中 add-phone，尝试 HeroSMS 手机验证")
+    else:
+        _info("命中 add-phone，尝试 HeroSMS 手机验证")
+
+    phone_ok, phone_next = _try_verify_phone_via_hero_sms(
+        session,
+        proxies=proxies,
+        hint_url=(resolved_hint or resolved_current),
+    )
+    if phone_ok:
+        next_url = str(phone_next or resolved_current or resolved_hint).strip()
+        return True, next_url, ""
+
+    reason = str(phone_next or "add-phone 手机验证失败").strip()
+    _warn(f"HeroSMS 手机验证失败: {reason}")
+    if _is_hero_sms_balance_issue(reason):
+        _warn("HeroSMS 余额不足，保留当前账号，等待充值后重试")
+        raise HeroSmsBalanceLowError(reason)
+    if _is_hero_sms_country_blocked_issue(reason):
+        raise HeroSmsCountryBlockedError(reason)
+    if _is_hero_sms_timeout_issue(reason):
+        _warn("HeroSMS 接码超时，保留复用号码并结束当前尝试")
+        raise HeroSmsCodeTimeoutError(reason)
+    if mark_bad_email_on_fail:
+        _mark_graph_bad_email(email, "add_phone_required")
+    return False, (resolved_current or resolved_hint), reason
 
 
 def _to_int(v: Any) -> int:
@@ -2688,27 +2820,16 @@ def _login_via_password_and_finish_oauth(
         )
 
     _, current_url = _follow_redirect_chain(s, next_url, proxies)
-    if _is_add_phone_url(current_url):
-        _info("登录流程命中 add-phone，尝试 HeroSMS 手机验证")
-        phone_ok, phone_next = _try_verify_phone_via_hero_sms(
-            s,
-            proxies=proxies,
-            hint_url=current_url,
-        )
-        if not phone_ok:
-            _warn(f"HeroSMS 手机验证失败: {phone_next}")
-            if _is_hero_sms_balance_issue(phone_next):
-                _warn("HeroSMS 余额不足，保留当前账号，等待充值后重试")
-                raise HeroSmsBalanceLowError(str(phone_next or "NO_BALANCE"))
-            if _is_hero_sms_country_blocked_issue(phone_next):
-                raise HeroSmsCountryBlockedError(str(phone_next or "国家受限"))
-            if _is_hero_sms_timeout_issue(phone_next):
-                _warn("HeroSMS 接码超时，保留复用号码并结束当前尝试")
-                raise HeroSmsCodeTimeoutError(str(phone_next or "接码超时"))
-            _mark_graph_bad_email(email, "add_phone_required")
-            return None
-        if phone_next:
-            current_url = phone_next
+    solved, current_url, _ = _handle_add_phone_challenge(
+        s,
+        current_url=current_url,
+        proxies=proxies,
+        email=email,
+        hint_url=current_url,
+        scene="登录流程",
+    )
+    if not solved:
+        return None
     if "code=" in current_url and "state=" in current_url:
         try:
             account = submit_callback_url(
@@ -2784,27 +2905,16 @@ def _login_via_password_and_finish_oauth(
         if otp_next:
             _info(f"OTP 后继续: {otp_next[:80]}…")
             _, current_url = _follow_redirect_chain(s, otp_next, proxies)
-        if _is_add_phone_url(current_url):
-            _info("登录 OTP 后进入 add-phone，尝试 HeroSMS 手机验证")
-            phone_ok, phone_next = _try_verify_phone_via_hero_sms(
-                s,
-                proxies=proxies,
-                hint_url=current_url,
-            )
-            if not phone_ok:
-                _warn(f"HeroSMS 手机验证失败: {phone_next}")
-                if _is_hero_sms_balance_issue(phone_next):
-                    _warn("HeroSMS 余额不足，保留当前账号，等待充值后重试")
-                    raise HeroSmsBalanceLowError(str(phone_next or "NO_BALANCE"))
-                if _is_hero_sms_country_blocked_issue(phone_next):
-                    raise HeroSmsCountryBlockedError(str(phone_next or "国家受限"))
-                if _is_hero_sms_timeout_issue(phone_next):
-                    _warn("HeroSMS 接码超时，保留复用号码并结束当前尝试")
-                    raise HeroSmsCodeTimeoutError(str(phone_next or "接码超时"))
-                _mark_graph_bad_email(email, "add_phone_required")
-                return None
-            if phone_next:
-                current_url = phone_next
+        solved, current_url, _ = _handle_add_phone_challenge(
+            s,
+            current_url=current_url,
+            proxies=proxies,
+            email=email,
+            hint_url=current_url,
+            scene="登录 OTP 后",
+        )
+        if not solved:
+            return None
         if "code=" in current_url and "state=" in current_url:
             try:
                 account = submit_callback_url(
@@ -2819,27 +2929,16 @@ def _login_via_password_and_finish_oauth(
                 _err(f"交换 token 失败: {e}")
                 return None
 
-    if _is_add_phone_url(current_url):
-        _info("登录流程停留在 add-phone，尝试 HeroSMS 手机验证")
-        phone_ok, phone_next = _try_verify_phone_via_hero_sms(
-            s,
-            proxies=proxies,
-            hint_url=current_url,
-        )
-        if not phone_ok:
-            _warn(f"HeroSMS 手机验证失败: {phone_next}")
-            if _is_hero_sms_balance_issue(phone_next):
-                _warn("HeroSMS 余额不足，保留当前账号，等待充值后重试")
-                raise HeroSmsBalanceLowError(str(phone_next or "NO_BALANCE"))
-            if _is_hero_sms_country_blocked_issue(phone_next):
-                raise HeroSmsCountryBlockedError(str(phone_next or "国家受限"))
-            if _is_hero_sms_timeout_issue(phone_next):
-                _warn("HeroSMS 接码超时，保留复用号码并结束当前尝试")
-                raise HeroSmsCodeTimeoutError(str(phone_next or "接码超时"))
-            _mark_graph_bad_email(email, "add_phone_required")
-            return None
-        if phone_next:
-            current_url = phone_next
+    solved, current_url, _ = _handle_add_phone_challenge(
+        s,
+        current_url=current_url,
+        proxies=proxies,
+        email=email,
+        hint_url=current_url,
+        scene="登录流程停留",
+    )
+    if not solved:
+        return None
 
     _info("workspace 选择与最终换 token")
     auth_cookie, auth_claims, workspaces = _session_workspaces(s)
@@ -3304,37 +3403,24 @@ def run(proxy: Optional[str]):
             create_continue = ""
             create_page = ""
 
-        if create_page == "add_phone" or "phone" in create_continue.lower():
+        if _is_add_phone_page(create_page) or _is_add_phone_url(create_continue):
             _info("进入手机号页：优先尝试 HeroSMS 手机验证")
-            phone_ok, phone_next = _try_verify_phone_via_hero_sms(
+            phone_entry_url = str(create_continue or "https://auth.openai.com/add-phone").strip()
+            phone_ok, phone_next, phone_reason = _handle_add_phone_challenge(
                 s,
+                current_url=phone_entry_url,
                 proxies=proxies,
-                hint_url=create_continue,
+                email=email,
+                hint_url=phone_entry_url,
+                scene="注册流程",
+                mark_bad_email_on_fail=False,
             )
             if phone_ok:
                 create_continue = str(phone_next or create_continue or "").strip()
                 create_page = ""
                 _info("HeroSMS 手机验证通过，继续当前会话")
             else:
-                _warn(f"HeroSMS 手机验证失败: {phone_next}")
-                if _is_hero_sms_balance_issue(phone_next):
-                    return _fail(
-                        password,
-                        "phone_balance_insufficient",
-                        str(phone_next or "HeroSMS 余额不足")[:220],
-                    )
-                if _is_hero_sms_country_blocked_issue(phone_next):
-                    return _fail(
-                        password,
-                        "phone_country_blocked",
-                        str(phone_next or "国家受限")[:220],
-                    )
-                if _is_hero_sms_timeout_issue(phone_next):
-                    return _fail(
-                        password,
-                        "phone_sms_timeout",
-                        str(phone_next or "接码超时")[:220],
-                    )
+                create_continue = str(phone_next or create_continue or phone_entry_url).strip()
                 _info("改走邮箱密码登录完成 OAuth")
                 try:
                     account = _login_via_password_and_finish_oauth(
@@ -3362,12 +3448,12 @@ def run(proxy: Optional[str]):
                     _mark_graph_bad_email(email, "注册成功后已消费")
                     return _ok(account, password)
                 _err("手机号分支下补救登录失败")
-                if _is_add_phone_url(create_continue) or create_page == "add_phone":
+                if _is_add_phone_url(create_continue) or _is_add_phone_page(create_page):
                     _mark_graph_bad_email(email, "add_phone_required")
                     return _fail(
                         password,
                         "phone_gate",
-                        str(phone_next or "进入 add-phone，需手机号验证")[:220],
+                        str(phone_reason or "进入 add-phone，需手机号验证")[:220],
                     )
                 return None, password
 

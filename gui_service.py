@@ -702,8 +702,21 @@ class RegisterService:
 
         provider = normalize_mail_provider(cfg.get("mail_service_provider") or "mailfree")
         worker_domain = str(cfg.get("worker_domain") or "").strip()
+        mail_domains_raw = str(cfg.get("mail_domains") or "").strip()
+        mail_domains = [
+            x
+            for x in re.split(r"[\n\r,;\s]+", mail_domains_raw)
+            if str(x or "").strip()
+        ]
+        mail_allow_domains = self._normalize_domain_list(cfg.get("mail_domain_allowlist") or [])
         freemail_user = str(cfg.get("freemail_username") or "").strip()
         freemail_pass = str(cfg.get("freemail_password") or "").strip()
+        cf_temp_admin_auth = str(cfg.get("cf_temp_admin_auth") or "").strip()
+        cloudmail_api_url = str(cfg.get("cloudmail_api_url") or "").strip()
+        cloudmail_admin_email = str(cfg.get("cloudmail_admin_email") or "").strip()
+        cloudmail_admin_password = str(cfg.get("cloudmail_admin_password") or "").strip()
+        mail_curl_api_base = str(cfg.get("mail_curl_api_base") or "").strip()
+        mail_curl_key = str(cfg.get("mail_curl_key") or "").strip()
         graph_file = str(cfg.get("graph_accounts_file") or "").strip()
         gmail_user = str(cfg.get("gmail_imap_user") or "").strip()
         gmail_pass = str(cfg.get("gmail_imap_pass") or "").strip()
@@ -713,14 +726,34 @@ class RegisterService:
             for x in re.split(r"[\n\r,;\s]+", gmail_aliases_raw)
             if str(x or "").strip()
         ]
-
-        if provider == "mailfree":
+        if provider == "cloudflare_temp_email":
+            if not worker_domain:
+                blockers.append("Cloudflare Temp Email 服务地址未填写（worker_domain）")
+            if not cf_temp_admin_auth:
+                blockers.append("Cloudflare Temp Email 管理员口令未填写（cf_temp_admin_auth）")
+            if not mail_domains and not mail_allow_domains:
+                blockers.append("Cloudflare Temp Email 域名池为空（mail_domains）")
+        elif provider == "mailfree":
             if not worker_domain:
                 blockers.append("邮箱服务地址未填写（worker_domain）")
             if not freemail_user:
                 blockers.append("MailFree 用户名未填写（freemail_username）")
             if not freemail_pass:
                 blockers.append("MailFree 密码未填写（freemail_password）")
+        elif provider == "cloudmail":
+            if not cloudmail_api_url:
+                blockers.append("CloudMail API 地址未填写（cloudmail_api_url）")
+            if not cloudmail_admin_email:
+                blockers.append("CloudMail 管理员邮箱未填写（cloudmail_admin_email）")
+            if not cloudmail_admin_password:
+                blockers.append("CloudMail 管理员密码未填写（cloudmail_admin_password）")
+            if not mail_domains and not mail_allow_domains:
+                blockers.append("CloudMail 域名池为空（mail_domains）")
+        elif provider == "mail_curl":
+            if not mail_curl_api_base:
+                blockers.append("Mail-Curl API 地址未填写（mail_curl_api_base）")
+            if not mail_curl_key:
+                blockers.append("Mail-Curl Key 未填写（mail_curl_key）")
         elif provider == "gmail":
             if not gmail_user:
                 blockers.append("Gmail IMAP 账号未填写（gmail_imap_user）")
@@ -940,8 +973,15 @@ class RegisterService:
             "flclash_switch_policy",
             "flclash_delay_test_url",
             "worker_domain",
+            "mail_domains",
             "freemail_username",
             "freemail_password",
+            "cf_temp_admin_auth",
+            "cloudmail_api_url",
+            "cloudmail_admin_email",
+            "cloudmail_admin_password",
+            "mail_curl_api_base",
+            "mail_curl_key",
             "graph_accounts_file",
             "graph_tenant",
             "graph_fetch_mode",
@@ -1053,6 +1093,17 @@ class RegisterService:
         cfg["mail_service_provider"] = normalize_mail_provider(
             cfg.get("mail_service_provider") or "mailfree"
         )
+        mail_domains_raw = str(cfg.get("mail_domains") or "").strip()
+        if mail_domains_raw:
+            cfg["mail_domains"] = ",".join(
+                [
+                    str(x or "").strip().lower()
+                    for x in re.split(r"[\n\r,;\s]+", mail_domains_raw)
+                    if str(x or "").strip()
+                ]
+            )
+        else:
+            cfg["mail_domains"] = ""
         graph_mode = str(cfg.get("graph_fetch_mode") or "graph_api").strip().lower()
         if graph_mode not in {"graph_api", "imap_xoauth2"}:
             graph_mode = "graph_api"
@@ -1116,8 +1167,16 @@ class RegisterService:
         if domain and not domain.startswith("http"):
             domain = f"https://{domain}"
         os.environ["WORKER_DOMAIN"] = domain.rstrip("/")
+        os.environ["MAIL_DOMAINS"] = str(self.cfg.get("mail_domains") or "").strip()
         os.environ["FREEMAIL_USERNAME"] = str(self.cfg.get("freemail_username") or "")
         os.environ["FREEMAIL_PASSWORD"] = str(self.cfg.get("freemail_password") or "")
+        os.environ["CF_TEMP_ADMIN_AUTH"] = str(self.cfg.get("cf_temp_admin_auth") or "")
+        os.environ["ADMIN_AUTH"] = str(self.cfg.get("cf_temp_admin_auth") or "")
+        os.environ["CLOUDMAIL_API_URL"] = str(self.cfg.get("cloudmail_api_url") or "").strip()
+        os.environ["CLOUDMAIL_ADMIN_EMAIL"] = str(self.cfg.get("cloudmail_admin_email") or "").strip()
+        os.environ["CLOUDMAIL_ADMIN_PASSWORD"] = str(self.cfg.get("cloudmail_admin_password") or "")
+        os.environ["MAIL_CURL_API_BASE"] = str(self.cfg.get("mail_curl_api_base") or "").strip()
+        os.environ["MAIL_CURL_KEY"] = str(self.cfg.get("mail_curl_key") or "")
         os.environ["MAIL_SERVICE_PROVIDER"] = normalize_mail_provider(
             self.cfg.get("mail_service_provider") or "mailfree"
         )
@@ -1548,7 +1607,7 @@ class RegisterService:
     def _mail_proxy(self) -> dict[str, str] | None:
         return _mail_mail_proxy(self)
 
-    def _mail_client_signature(self) -> tuple[str, str, str, str, bool, str, str, str]:
+    def _mail_client_signature(self) -> tuple[Any, ...]:
         return _mail_mail_client_signature(self)
 
     def _get_mail_client(self):
@@ -1934,6 +1993,10 @@ class RegisterService:
             fp = str(self.cfg.get("freemail_password") or "")
             fp_mask = (fp[:3] + "***") if len(fp) >= 3 else ("***" if fp else "")
             random_domain_on = bool(self.cfg.get("mailfree_random_domain", True))
+            mail_domains_raw = str(self.cfg.get("mail_domains") or "").strip()
+            mail_domains_list = [
+                x for x in re.split(r"[\n\r,;\s]+", mail_domains_raw) if str(x or "").strip()
+            ]
             allow_domains = list(r_with_pwd.MAIL_ALLOWED_DOMAINS or [])
             if mail_provider == "mailfree":
                 self.log(
@@ -1963,6 +2026,29 @@ class RegisterService:
                         "配置 -> "
                         f"mail={mail_provider}, graph_file={graph_file}, tenant={graph_tenant}, "
                         f"pre_refresh={'开启' if graph_pre_refresh else '关闭'}"
+                    )
+                elif mail_provider == "cloudflare_temp_email":
+                    cf_temp_auth = str(self.cfg.get("cf_temp_admin_auth") or "")
+                    cf_mask = (cf_temp_auth[:3] + "***") if len(cf_temp_auth) >= 3 else ("***" if cf_temp_auth else "")
+                    self.log(
+                        "配置 -> "
+                        f"mail={mail_provider}, api={r_with_pwd.WORKER_DOMAIN}, admin_auth={cf_mask}, "
+                        f"domains={len(mail_domains_list)}, random_domain={'开' if random_domain_on else '关'}"
+                    )
+                elif mail_provider == "cloudmail":
+                    cm_api = str(self.cfg.get("cloudmail_api_url") or "").strip()
+                    cm_admin = str(self.cfg.get("cloudmail_admin_email") or "").strip()
+                    self.log(
+                        "配置 -> "
+                        f"mail={mail_provider}, api={cm_api}, admin={cm_admin}, domains={len(mail_domains_list)}"
+                    )
+                elif mail_provider == "mail_curl":
+                    mc_api = str(self.cfg.get("mail_curl_api_base") or "").strip()
+                    mc_key = str(self.cfg.get("mail_curl_key") or "")
+                    mc_mask = (mc_key[:4] + "***") if len(mc_key) >= 4 else ("***" if mc_key else "")
+                    self.log(
+                        "配置 -> "
+                        f"mail={mail_provider}, api={mc_api}, key={mc_mask}"
                     )
                 else:
                     gmail_user = str(self.cfg.get("gmail_imap_user") or "").strip().lower()

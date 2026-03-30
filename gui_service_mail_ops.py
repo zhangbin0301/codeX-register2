@@ -27,9 +27,16 @@ def mail_client_signature(service) -> tuple[Any, ...]:
     domain = str(service.cfg.get("worker_domain") or "").strip()
     if domain and not domain.startswith("http"):
         domain = f"https://{domain}"
+    mail_domains = str(service.cfg.get("mail_domains") or "").strip()
     graph_accounts_file = str(service.cfg.get("graph_accounts_file") or "").strip()
     graph_tenant = str(service.cfg.get("graph_tenant") or "common").strip()
     graph_fetch_mode = str(service.cfg.get("graph_fetch_mode") or "graph_api").strip()
+    cf_temp_admin_auth = str(service.cfg.get("cf_temp_admin_auth") or "")
+    cloudmail_api_url = str(service.cfg.get("cloudmail_api_url") or "").strip()
+    cloudmail_admin_email = str(service.cfg.get("cloudmail_admin_email") or "").strip()
+    cloudmail_admin_password = str(service.cfg.get("cloudmail_admin_password") or "")
+    mail_curl_api_base = str(service.cfg.get("mail_curl_api_base") or "").strip()
+    mail_curl_key = str(service.cfg.get("mail_curl_key") or "")
     gmail_imap_user = str(service.cfg.get("gmail_imap_user") or "").strip()
     gmail_imap_pass = str(service.cfg.get("gmail_imap_pass") or "")
     gmail_alias_emails = str(service.cfg.get("gmail_alias_emails") or "").strip()
@@ -43,6 +50,13 @@ def mail_client_signature(service) -> tuple[Any, ...]:
         str(service.cfg.get("freemail_username") or "").strip(),
         str(service.cfg.get("freemail_password") or ""),
         bool(service.cfg.get("openai_ssl_verify", True)),
+        mail_domains,
+        cf_temp_admin_auth,
+        cloudmail_api_url,
+        cloudmail_admin_email,
+        cloudmail_admin_password,
+        mail_curl_api_base,
+        mail_curl_key,
         graph_accounts_file,
         graph_tenant,
         graph_fetch_mode,
@@ -70,6 +84,13 @@ def get_mail_client(service):
         username,
         password,
         verify_ssl,
+        mail_domains,
+        cf_temp_admin_auth,
+        cloudmail_api_url,
+        cloudmail_admin_email,
+        cloudmail_admin_password,
+        mail_curl_api_base,
+        mail_curl_key,
         graph_accounts_file,
         graph_tenant,
         graph_fetch_mode,
@@ -81,6 +102,14 @@ def get_mail_client(service):
         gmail_alias_tag_len,
         gmail_alias_mix_googlemail,
     ) = sig
+    os.environ["MAIL_DOMAINS"] = mail_domains
+    os.environ["CF_TEMP_ADMIN_AUTH"] = cf_temp_admin_auth
+    os.environ["ADMIN_AUTH"] = cf_temp_admin_auth
+    os.environ["CLOUDMAIL_API_URL"] = cloudmail_api_url
+    os.environ["CLOUDMAIL_ADMIN_EMAIL"] = cloudmail_admin_email
+    os.environ["CLOUDMAIL_ADMIN_PASSWORD"] = cloudmail_admin_password
+    os.environ["MAIL_CURL_API_BASE"] = mail_curl_api_base
+    os.environ["MAIL_CURL_KEY"] = mail_curl_key
     os.environ["GRAPH_ACCOUNTS_FILE"] = graph_accounts_file
     os.environ["GRAPH_TENANT"] = graph_tenant
     os.environ["GRAPH_FETCH_MODE"] = graph_fetch_mode

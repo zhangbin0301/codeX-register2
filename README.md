@@ -24,7 +24,7 @@ CodeX Register 是一个桌面化的 Web 控制台，用于统一管理注册流
 ## 功能概览
 
 - 统一工作台：开始/停止任务、实时日志、重试原因、成功率、SMS 花费与余额统计。
-- 邮箱体系：支持 MailFree、Gmail IMAP 与 Microsoft Graph，支持 Graph 文件导入、轮询与 token 刷新。
+- 邮箱体系：支持 Cloudflare Temp Email、MailFree、CloudMail、Mail-Curl、Gmail IMAP 与 Microsoft Graph，支持 Graph 文件导入、轮询与 token 刷新。
 - SMS 管理：支持 HeroSMS 余额检查、国家下拉（含价格/库存）、国家过滤、手机号复用、自动国家优选。
 - 代理能力：支持固定 HTTP 代理与 FlClash 动态切节点（含延迟探测、批次共享节点、自动过滤不可用节点）。
 - 数据管理：本地 `accounts_*.json` 与 `accounts.txt` 汇总、备注、导出、同步远端。
@@ -38,7 +38,7 @@ gui.py
   -> gui_frontend.py (组装 HTML/CSS/JS)
   -> gui_service.py (核心编排/状态/日志)
       -> r_with_pwd.py (注册与 OAuth 主流程)
-      -> mail_services.py (MailFree / Graph 收件与邮箱池)
+      -> mail_services.py + mail_providers/ (邮箱服务抽象与各 Provider 模块)
 ```
 
 ## 环境要求
@@ -135,14 +135,21 @@ python gui.py --mode browser --no-auto-open
 | `flclash_delay_max_ms` | int | `1800` | 可用延迟阈值 |
 | `flclash_delay_retry` | int | `1` | 单节点延迟探测重试次数 |
 
-### 3) 邮箱服务（[MailFree](https://github.com/Msg-Lbo/mailfree) / Gmail IMAP / [Graph](https://learn.microsoft.com/zh-cn/graph/use-the-api)）
+### 3) 邮箱服务（Cloudflare Temp Email / [MailFree](https://github.com/Msg-Lbo/mailfree) / CloudMail / Mail-Curl / Gmail IMAP / [Graph](https://learn.microsoft.com/zh-cn/graph/use-the-api)）
 
 | 键名 | 类型 | 默认值 | 说明 |
 |---|---|---:|---|
-| `mail_service_provider` | string | `"mailfree"` | `mailfree` / `gmail` / `graph` |
+| `mail_service_provider` | string | `"mailfree"` | `cloudflare_temp_email` / `mailfree` / `cloudmail` / `mail_curl` / `gmail` / `graph` |
+| `mail_domains` | string | `""` | 域名池（逗号/空格分隔），供 Cloudflare Temp / CloudMail 使用 |
 | `worker_domain` | string | `""` | MailFree 服务基地址 |
 | `freemail_username` | string | `""` | MailFree 用户名 |
 | `freemail_password` | string | `""` | MailFree 密码 |
+| `cf_temp_admin_auth` | string | `""` | Cloudflare Temp Email 管理员口令 |
+| `cloudmail_api_url` | string | `""` | CloudMail API 基地址 |
+| `cloudmail_admin_email` | string | `""` | CloudMail 管理员邮箱 |
+| `cloudmail_admin_password` | string | `""` | CloudMail 管理员密码 |
+| `mail_curl_api_base` | string | `""` | Mail-Curl API 基地址 |
+| `mail_curl_key` | string | `""` | Mail-Curl Key |
 | `gmail_imap_user` | string | `""` | Gmail IMAP 登录账号（建议 Gmail 主号） |
 | `gmail_imap_pass` | string | `""` | Gmail 应用专用密码（16 位） |
 | `gmail_alias_emails` | string | `""` | 别名主邮箱池，逗号/空格分隔（留空默认用 `gmail_imap_user`） |
@@ -159,6 +166,12 @@ python gui.py --mode browser --no-auto-open
 | `mailbox_custom_enabled` | bool | `false` | 启用自定义邮箱 local-part |
 | `mailbox_prefix` | string | `""` | 自定义前缀 |
 | `mailbox_random_len` | int | `0` | 前缀后追加随机长度 |
+
+实现对齐（参考开源文档）：
+- Cloudflare Temp Email（`dreamhunter2333/cloudflare_temp_email`）：`/admin/new_address`、`/admin/mails`、`/admin/address`、`/admin/delete_address/:id`，使用 `x-admin-auth`。
+- MailFree（`Msg-Lbo/mailfree`）：`/api/login`、`/api/generate`、`/api/emails`、`/api/email/{id}`、`/api/mailbox/{address}`（同时兼容旧版 `/api/mailboxes`）。
+- CloudMail（`maillab/cloud-mail`）：`/api/public/genToken`、`/api/public/addUser`、`/api/public/emailList`，使用 `Authorization` token。
+- Mail-Curl（`s12ryt/mail-curl`）：`/api/remail`、`/api/inbox`、`/api/mail`、`/api/ls`（通过 `key` 鉴权）。
 
 ### 4) SMS（[HeroSMS](https://hero-sms.com/cn)）
 

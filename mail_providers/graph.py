@@ -18,4 +18,3 @@ def build_graph_service(
         verify_ssl=verify_ssl,
         logger=logger,
     )
-

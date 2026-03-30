@@ -26,9 +26,15 @@ class MailServiceError(RuntimeError):
 def normalize_mail_provider(raw: Any) -> str:
     """标准化邮箱服务提供商标识。"""
     val = str(raw or "").strip().lower()
+    if val in {"cloudflare_temp_email", "cloudflare-temp-email", "cf_temp", "gptmail", "worker_api"}:
+        return "cloudflare_temp_email"
+    if val in {"cloudmail", "cloud_mail"}:
+        return "cloudmail"
+    if val in {"mail_curl", "mailcurl", "curl_mail"}:
+        return "mail_curl"
     if val in {"mailfree", "freemail", "worker"}:
         return "mailfree"
-    if val in {"gmail", "gmail_imap", "imap_gmail"}:
+    if val in {"gmail", "gmail_imap", "imap_gmail", "imap"}:
         return "gmail"
     if val in {"graph", "microsoft_graph", "msgraph", "microsoft"}:
         return "graph"
@@ -38,7 +44,10 @@ def normalize_mail_provider(raw: Any) -> str:
 def available_mail_providers() -> list[dict[str, str]]:
     """返回当前可选邮箱服务列表。"""
     return [
+        {"label": "Cloudflare Temp Email", "value": "cloudflare_temp_email"},
         {"label": "MailFree", "value": "mailfree"},
+        {"label": "CloudMail", "value": "cloudmail"},
+        {"label": "Mail-Curl", "value": "mail_curl"},
         {"label": "Gmail IMAP", "value": "gmail"},
         {"label": "Microsoft Graph", "value": "graph"},
     ]
@@ -566,34 +575,58 @@ class MailFreeService(MailServiceBase):
             return ""
 
 
-        method = "DELETE"
-        path = "/api/mailboxes"
-        resp = self._request(
-            method,
-            path,
-            params={"address": target},
-            need_auth=True,
-            timeout=20,
-            proxies=proxies,
-        )
-        code = int(resp.status_code or 0)
-        payload = self._json_or_none(resp)
+        attempts = [
+            {
+                "method": "DELETE",
+                "path": f"/api/mailbox/{urllib.parse.quote(target, safe='')}",
+                "params": None,
+            },
+            {
+                "method": "DELETE",
+                "path": "/api/mailboxes",
+                "params": {"address": target},
+            },
+        ]
 
-        if 200 <= code < 300:
-            fail_reason = _payload_fail_reason(payload)
-            if fail_reason:
-                raise MailServiceError(f"删除邮箱失败: {fail_reason}")
-            return {
-                "success": True,
-                "address": target,
-                "api_method": method,
-                "api_path": path,
-            }
+        last_code = 0
+        last_text = ""
+        for req in attempts:
+            method = str(req.get("method") or "DELETE")
+            path = str(req.get("path") or "")
+            params = req.get("params")
+            resp = self._request(
+                method,
+                path,
+                params=params,
+                need_auth=True,
+                timeout=20,
+                proxies=proxies,
+            )
+            code = int(resp.status_code or 0)
+            payload = self._json_or_none(resp)
+            last_code = code
+            last_text = str(resp.text or "")
 
-        snippet = _safe_text(resp.text)
-        if code == 404:
-            raise MailServiceError("删除邮箱失败 HTTP 404: 未找到 API 路径 /api/mailboxes")
-        raise MailServiceError(f"删除邮箱失败 HTTP {code}: {snippet}")
+            if 200 <= code < 300:
+                fail_reason = _payload_fail_reason(payload)
+                if fail_reason:
+                    raise MailServiceError(f"删除邮箱失败: {fail_reason}")
+                return {
+                    "success": True,
+                    "address": target,
+                    "api_method": method,
+                    "api_path": path,
+                }
+
+            # 老版本接口不存在时继续尝试下一个路径。
+            if code == 404:
+                continue
+            break
+
+        snippet = _safe_text(last_text)
+        if last_code == 404:
+            raise MailServiceError("删除邮箱失败 HTTP 404: 未找到可用邮箱删除接口")
+        raise MailServiceError(f"删除邮箱失败 HTTP {last_code}: {snippet}")
 
     @staticmethod
     def _sender_text(raw_from: Any) -> str:
@@ -2114,8 +2147,16 @@ def build_mail_service(
 ) -> MailServiceBase:
     """按 provider 构建邮箱服务客户端。"""
     p = normalize_mail_provider(provider)
+    if p == "cloudflare_temp_email":
+        from mail_providers.cloudflare_temp import build_cloudflare_temp_service
+
+        return build_cloudflare_temp_service(
+            base_url=base_url,
+            verify_ssl=verify_ssl,
+            logger=logger,
+        )
     if p == "mailfree":
-        from mail_service_mailfree import build_mailfree_service
+        from mail_providers.mailfree import build_mailfree_service
 
         return build_mailfree_service(
             base_url=base_url,
@@ -2125,14 +2166,28 @@ def build_mail_service(
             logger=logger,
         )
     if p == "gmail":
-        from mail_service_gmail import build_gmail_service
+        from mail_providers.gmail import build_gmail_service
 
         return build_gmail_service(
             verify_ssl=verify_ssl,
             logger=logger,
         )
+    if p == "cloudmail":
+        from mail_providers.cloudmail import build_cloudmail_service
+
+        return build_cloudmail_service(
+            verify_ssl=verify_ssl,
+            logger=logger,
+        )
+    if p == "mail_curl":
+        from mail_providers.mail_curl import build_mail_curl_service
+
+        return build_mail_curl_service(
+            verify_ssl=verify_ssl,
+            logger=logger,
+        )
     if p == "graph":
-        from mail_service_graph import build_graph_service
+        from mail_providers.graph import build_graph_service
 
         return build_graph_service(
             verify_ssl=verify_ssl,
