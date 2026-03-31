@@ -7,7 +7,7 @@ CodeX Register Web 控制台（Naive UI）。
 - 默认用 pywebview 打包为独立应用窗口显示（可切换浏览器模式）；
 - 读写 gui_config.json，并将核心配置同步到环境变量；
 - 在后台线程执行 r_with_pwd.run，实时采集日志；
-- 管理 accounts_*.json、accounts.txt、本地同步与管理端拉取。
+- 管理 accounts_*.json、accounts.txt 与 local_accounts.db，本地同步与管理端拉取。
 """
 
 from __future__ import annotations
@@ -42,8 +42,10 @@ from gui_service_data_ops import (
     accounts_txt_path as _data_accounts_txt_path,
     build_email_source_files_map as _data_build_email_source_files_map,
     build_local_account_index as _data_build_local_account_index,
+    delete_local_accounts as _data_delete_local_accounts,
     delete_json_files as _data_delete_json_files,
     export_codex_accounts as _data_export_codex_accounts,
+    export_sub2api_accounts as _data_export_sub2api_accounts,
     email_from_account_entry as _data_email_from_account_entry,
     emails_from_accounts_json as _data_emails_from_accounts_json,
     list_accounts as _data_list_accounts,
@@ -51,6 +53,8 @@ from gui_service_data_ops import (
     save_json_file_note as _data_save_json_file_note,
     source_label as _data_source_label,
     sync_selected_accounts as _data_sync_selected_accounts,
+    test_local_accounts_via_cpa as _data_test_local_accounts_via_cpa,
+    upsert_local_account_record as _data_upsert_local_account_record,
 )
 from gui_service_mail_ops import (
     get_mail_client as _mail_get_mail_client,
@@ -330,6 +334,10 @@ class RegisterService:
         self._remote_email_counts: dict[str, int] = {}
         self._remote_sync_status_ready = False
         self._remote_test_state: dict[str, dict[str, str]] = {}
+        self._local_cpa_test_state: dict[str, dict[str, str]] = self._normalize_local_cpa_test_state(
+            self.cfg.get("local_cpa_test_state") or {}
+        )
+        self.cfg["local_cpa_test_state"] = dict(self._local_cpa_test_state)
         self._remote_test_stats: dict[str, int] = {
             "total": 0,
             "done": 0,
@@ -466,6 +474,34 @@ class RegisterService:
                 note = note[:120]
             if note:
                 out[name] = note
+        return out
+
+    @staticmethod
+    def _normalize_local_cpa_test_state(values: Any) -> dict[str, dict[str, str]]:
+        if not isinstance(values, dict):
+            return {}
+        out: dict[str, dict[str, str]] = {}
+        for k, v in values.items():
+            email = str(k or "").strip().lower()
+            if not email or "@" not in email:
+                continue
+            if not isinstance(v, dict):
+                continue
+            status = str(v.get("status") or "未测").strip() or "未测"
+            result = str(v.get("result") or "-").strip() or "-"
+            at = str(v.get("at") or "-").strip() or "-"
+            out[email] = {
+                "status": status,
+                "result": result,
+                "at": at,
+            }
+        if len(out) > 3000:
+            ordered = sorted(
+                out.items(),
+                key=lambda kv: str((kv[1] or {}).get("at") or ""),
+                reverse=True,
+            )
+            out = dict(ordered[:3000])
         return out
 
     @staticmethod
@@ -1211,6 +1247,9 @@ class RegisterService:
         cfg["json_file_notes"] = self._normalize_json_file_notes(
             cfg.get("json_file_notes") or {}
         )
+        cfg["local_cpa_test_state"] = self._normalize_local_cpa_test_state(
+            cfg.get("local_cpa_test_state") or {}
+        )
 
         cfg["accounts_list_page_size"] = 10
 
@@ -1225,6 +1264,10 @@ class RegisterService:
                 self._remote_email_counts = {}
                 self._remote_sync_status_ready = False
                 self._remote_test_state = {}
+            self._local_cpa_test_state = self._normalize_local_cpa_test_state(
+                cfg.get("local_cpa_test_state") or {}
+            )
+            cfg["local_cpa_test_state"] = dict(self._local_cpa_test_state)
             self.cfg = cfg
             self._mail_client = None
             self._mail_client_sig = None
@@ -2904,6 +2947,22 @@ class RegisterService:
                                                                 f"[F{file_no}W{worker_no}] "
                                                                 f"写入 accounts.txt 失败: {e}"
                                                             )
+                                                    if email:
+                                                        try:
+                                                            src_name = os.path.basename(
+                                                                str(getattr(r_with_pwd, "_ACCOUNTS_FILE_PATH", "") or "")
+                                                            )
+                                                            self.upsert_local_account_record(
+                                                                email,
+                                                                pwd,
+                                                                acct,
+                                                                src_name,
+                                                            )
+                                                        except Exception as e:
+                                                            self.log(
+                                                                f"[F{file_no}W{worker_no}] "
+                                                                f"写入 local_accounts.db 失败: {e}"
+                                                            )
                                         if written:
                                             succ_domain = self._email_domain(email)
                                             if succ_domain:
@@ -3124,6 +3183,9 @@ class RegisterService:
     def delete_json_files(self, paths: list[str]) -> dict[str, Any]:
         return _data_delete_json_files(self, paths)
 
+    def delete_local_accounts(self, emails: list[str]) -> dict[str, Any]:
+        return _data_delete_local_accounts(self, emails)
+
     def sync_selected_accounts(
         self,
         emails: list[str],
@@ -3131,8 +3193,28 @@ class RegisterService:
     ) -> dict[str, Any]:
         return _data_sync_selected_accounts(self, emails, provider_override)
 
+    def test_local_accounts_via_cpa(self, emails: list[str]) -> dict[str, Any]:
+        return _data_test_local_accounts_via_cpa(self, emails)
+
+    def export_sub2api_accounts(
+        self,
+        emails: list[str],
+        file_count: int = 1,
+        accounts_per_file: int = 0,
+    ) -> dict[str, Any]:
+        return _data_export_sub2api_accounts(self, emails, file_count, accounts_per_file)
+
     def export_codex_accounts(self, emails: list[str]) -> dict[str, Any]:
         return _data_export_codex_accounts(self, emails)
+
+    def upsert_local_account_record(
+        self,
+        email: str,
+        password: str,
+        account: dict[str, Any] | None,
+        source_primary: str = "",
+    ) -> bool:
+        return _data_upsert_local_account_record(self, email, password, account, source_primary)
 
     @staticmethod
     def _remote_item_groups_label(it: dict[str, Any]) -> str:

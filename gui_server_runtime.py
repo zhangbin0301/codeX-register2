@@ -170,6 +170,14 @@ def _make_api_handler(service, index_html: str):
                     self._ok(service.delete_json_files(paths))
                     return
 
+                if path == "/api/data/accounts/delete":
+                    payload = self._read_json_body()
+                    emails = payload.get("emails") or []
+                    if not isinstance(emails, list):
+                        raise ValueError("emails 必须为数组")
+                    self._ok(service.delete_local_accounts(emails))
+                    return
+
                 if path == "/api/data/json/note":
                     payload = self._read_json_body()
                     p = str(payload.get("path") or "")
@@ -184,6 +192,30 @@ def _make_api_handler(service, index_html: str):
                     if not isinstance(emails, list):
                         raise ValueError("emails 必须为数组")
                     self._ok(service.sync_selected_accounts(emails, provider))
+                    return
+
+                if path == "/api/data/cpa/test":
+                    payload = self._read_json_body()
+                    emails = payload.get("emails") or []
+                    if not isinstance(emails, list):
+                        raise ValueError("emails 必须为数组")
+                    self._ok(service.test_local_accounts_via_cpa(emails))
+                    return
+
+                if path == "/api/data/sub2api/export":
+                    payload = self._read_json_body()
+                    emails = payload.get("emails") or []
+                    file_count = payload.get("file_count") or 1
+                    accounts_per_file = payload.get("accounts_per_file") or 0
+                    if not isinstance(emails, list):
+                        raise ValueError("emails 必须为数组")
+                    self._ok(
+                        service.export_sub2api_accounts(
+                            emails,
+                            int(file_count),
+                            int(accounts_per_file),
+                        )
+                    )
                     return
 
                 if path == "/api/data/codex/export":

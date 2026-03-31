@@ -27,7 +27,7 @@ CodeX Register 是一个桌面化的 Web 控制台，用于统一管理注册流
 - 邮箱体系：支持 Cloudflare Temp Email、MailFree、CloudMail、Mail-Curl、Gmail IMAP 与 Microsoft Graph，支持 Graph 文件导入、轮询与 token 刷新。
 - SMS 管理：支持 HeroSMS 余额检查、国家下拉（含价格/库存）、国家过滤、手机号复用、自动国家优选。
 - 代理能力：支持固定 HTTP 代理与 FlClash 动态切节点（含延迟探测、批次共享节点、自动过滤不可用节点）。
-- 数据管理：本地 `accounts_*.json` 导出文件管理，账号导入/云端维护独立到左侧“账号管理”。
+- 数据管理：本地 `accounts_*.json` 导出文件管理；本地账号统一落地到 SQLite（`local_accounts.db`），账号导入/云端维护独立到左侧“账号管理”。
 - 远端维护：支持 Sub2API / CLIProxyAPI 双云端账号源；均支持导入、批量测活、批量刷新、批量删除，Sub2API 额外支持复活与分组更新。
 
 ## 运行架构
@@ -89,7 +89,7 @@ python gui.py --mode browser --no-auto-open
 
 - `工作台`：任务控制、实时统计（含 SMS 消耗/余额/阈值）。
 - `数据`：本地 `accounts_*.json` 导出文件管理。
-- `账号管理`：本地页提供 `导入到sub2api`、`导入到cpa` 两个按钮；并保留 `导出为CPA可用文件`。
+- `账号管理`：本地账号以 SQLite（`local_accounts.db`）为唯一真源，支持按数量勾选、删除已选账号；`导出为Sub2API可用文件` 会弹窗设置“文件数/每文件账号数”；保留 `导入到sub2api`、`导入到cpa`、`导出为CPA可用文件`。
 - `云端账号`：支持 Sub2API / CLIProxyAPI 双源（测活/刷新/删除），其中 Sub2API 额外支持复活与分组维护。
 - `邮箱设置`：MailFree / Gmail IMAP / Graph 设置，支持 Graph 文件导入与收件检查。
 - `SMS管理`：HeroSMS 开关、API Key、服务代码、国家价格下拉、余额刷新。
@@ -264,8 +264,9 @@ bob@outlook.com----pass456----yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy----0.AXEA...
 
 ## 运行产物
 
-- `accounts_*.json`：成功账号 token 文件。
-- `accounts.txt`：账号与密码汇总。
+- `accounts_*.json`：成功账号 token 文件（兼容保留，可清理）。
+- `accounts.txt`：账号与密码汇总（兼容保留，可清理）。
+- `local_accounts.db`：本地账号 SQLite 存储（唯一真源）。
 - `gui_config.json`：本地配置回写。
 
 ## 本地 API 简表

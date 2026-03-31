@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
     "mail_domain_error_counts": {},
     "mail_domain_registered_counts": {},
     "json_file_notes": {},
+    "local_cpa_test_state": {},
     "mailfree_random_domain": True,
     "register_random_fingerprint": True,
     "openai_ssl_verify": True,

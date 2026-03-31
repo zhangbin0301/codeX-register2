@@ -161,7 +161,10 @@
           flclash_probe: false,
           json: false,
           accounts: false,
+          local_delete: false,
           sync: false,
+          local_cpa_test: false,
+          sub2api_export: false,
           codex_export: false,
           remote: false,
           remote_groups: false,
@@ -192,9 +195,14 @@
 
         const accountRows = Vue.ref([]);
         const accountSelection = Vue.ref([]);
-        const accountBatchFiles = Vue.ref([]);
-        const accountInfo = Vue.reactive({ total: 0, path: "accounts.txt", file_options: [] });
+        const accountPickCount = Vue.ref(20);
+        const accountInfo = Vue.reactive({ total: 0, path: "local_accounts.db", file_options: [] });
         const accountManageTab = Vue.ref("local");
+        const showSub2ApiExportModal = Vue.ref(false);
+        const sub2apiExportForm = Vue.reactive({
+          file_count: 1,
+          accounts_per_file: 50
+        });
 
         const remoteRows = Vue.ref([]);
         const remoteSelection = Vue.ref([]);
@@ -697,7 +705,7 @@
         }
 
         function accountRowClassName(row) {
-          return fileToneClass(row && row.source_color_idx);
+          return "";
         }
 
         function setJsonNoteDraft(path, val) {
@@ -853,13 +861,6 @@
           return classes.join(" ");
         }
 
-        function statusMeta(code) {
-          if (code === "ok") return { type: "success", text: "已同步" };
-          if (code === "pending") return { type: "warning", text: "待同步" };
-          if (code === "dup") return { type: "error", text: "重复" };
-          return { type: "default", text: "-" };
-        }
-
         const flclashPolicyOptions = [
           { label: "轮询切换", value: "round_robin" },
           { label: "随机切换", value: "random" }
@@ -947,28 +948,120 @@
         const accountColumns = [
           { type: "selection", multiple: true },
           { title: "#", key: "index", width: 56 },
-          { title: "来源文件", key: "source", minWidth: 220, ellipsis: { tooltip: true } },
           { title: "邮箱", key: "email", minWidth: 220, ellipsis: { tooltip: true } },
           { title: "密码", key: "password", minWidth: 180, ellipsis: { tooltip: true } },
           {
-            title: "同步",
-            key: "status",
+            title: "测活",
+            key: "test_status",
             width: 90,
             render(row) {
-              const meta = statusMeta(row.status);
+              const s = String(row.test_status || "未测").trim();
+              const detail = String(row.test_result || "-").trim();
+              if (s === "成功") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "success", size: "small", bordered: false, title: detail },
+                  { default: () => "成功" }
+                );
+              }
+              if (s === "失败") {
+                return Vue.h(
+                  naive.NTag,
+                  { type: "error", size: "small", bordered: false, title: detail },
+                  { default: () => "失败" }
+                );
+              }
               return Vue.h(
                 naive.NTag,
-                { type: meta.type, size: "small", bordered: false },
-                { default: () => meta.text }
+                { type: "default", size: "small", bordered: false, title: detail },
+                { default: () => "未测" }
               );
             }
-          }
+          },
+          { title: "备注", key: "note", minWidth: 300, ellipsis: { tooltip: true } }
         ];
+
+        function accountExportableRows() {
+          return accountRows.value.filter((x) => !x.locked);
+        }
+
+        function accountSelectedEmails(includeLocked = false) {
+          const keySet = new Set(accountSelection.value);
+          return accountRows.value
+            .filter((x) => keySet.has(x.key) && (includeLocked || !x.locked))
+            .map((x) => String(x.email || "").trim())
+            .filter((x) => !!x);
+        }
+
+        function openSub2ApiExportModal() {
+          const emails = accountSelectedEmails();
+          if (!emails.length) {
+            message.warning("请先勾选可导出的账号");
+            return;
+          }
+          const total = emails.length;
+          const defaultPerFile = Math.min(100, Math.max(1, total));
+          sub2apiExportForm.file_count = Math.max(1, Math.ceil(total / defaultPerFile));
+          sub2apiExportForm.accounts_per_file = defaultPerFile;
+          showSub2ApiExportModal.value = true;
+        }
+
+        async function confirmExportSub2Api() {
+          const emails = accountSelectedEmails();
+          if (!emails.length) {
+            message.warning("请先勾选可导出的账号");
+            return;
+          }
+
+          const fileCount = Math.max(1, Number(sub2apiExportForm.file_count || 1));
+          const perFile = Math.max(1, Number(sub2apiExportForm.accounts_per_file || 1));
+          if (fileCount * perFile < emails.length) {
+            message.warning("文件数 × 每文件账号数 小于当前勾选账号数，请调整后重试");
+            return;
+          }
+
+          loading.sub2api_export = true;
+          try {
+            await saveConfig(false);
+            const data = await apiRequest("/api/data/sub2api/export", {
+              method: "POST",
+              body: {
+                emails,
+                file_count: fileCount,
+                accounts_per_file: perFile
+              }
+            });
+
+            await refreshAccounts(false);
+            showSub2ApiExportModal.value = false;
+
+            const exported = Number((data && data.exported) || 0);
+            const missing = Array.isArray(data && data.missing) ? data.missing : [];
+            const fileNum = Number((data && data.file_count) || 0);
+            const dir = String((data && data.output_dir) || "");
+            const opened = !!(data && data.opened_dir);
+            const openSuffix = opened ? "，已打开目录" : "";
+            if (missing.length) {
+              message.warning(
+                `导出完成：${exported} 个，文件 ${fileNum} 个，缺失 ${missing.length} 个${openSuffix}`
+              );
+            } else {
+              message.success(`导出完成：${exported} 个，文件 ${fileNum} 个${openSuffix}`);
+            }
+            if (dir) {
+              message.info(`导出目录：${dir}`);
+            }
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.sub2api_export = false;
+          }
+        }
 
         const remoteColumns = [
           { type: "selection", multiple: true },
-          { title: "ID", key: "id", width: 64 },
-          { title: "名称/邮箱", key: "name", minWidth: 210, ellipsis: { tooltip: true } },
+          { title: "ID", key: "id", width: 180, ellipsis: { tooltip: true } },
+          { title: "名称/邮箱", key: "name", minWidth: 280, ellipsis: { tooltip: true } },
           {
             title: "重复",
             key: "is_dup",
@@ -984,10 +1077,10 @@
               );
             }
           },
-          { title: "平台", key: "platform", width: 70 },
-          { title: "类型", key: "type", width: 60 },
+          { title: "平台", key: "platform", width: 76 },
+          { title: "类型", key: "type", width: 72 },
           { title: "状态", key: "status", width: 76 },
-          { title: "分组", key: "groups", minWidth: 150, ellipsis: { tooltip: true } },
+          { title: "分组", key: "groups", minWidth: 260, ellipsis: { tooltip: true } },
           { title: "5h", key: "u5h", width: 72 },
           { title: "7d", key: "u7d", width: 72 },
           {
@@ -1060,6 +1153,14 @@
             }
           }
         ];
+
+        const remoteTableColumns = Vue.computed(() => {
+          const provider = normalizeRemoteAccountProvider(settingsForm.remote_account_provider);
+          if (provider === "cliproxyapi") {
+            return remoteColumns.filter((col) => col && col.key !== "groups");
+          }
+          return remoteColumns;
+        });
 
         const mailboxColumns = [
           { type: "selection", multiple: true },
@@ -1619,14 +1720,12 @@
               }))
               : [];
             accountInfo.total = Number(data.total || 0);
-            accountInfo.path = String(data.path || "accounts.txt");
+            accountInfo.path = String(data.path || "local_accounts.db");
             accountInfo.file_options = Array.isArray(data.file_options)
               ? data.file_options.map((name) => ({ label: String(name), value: String(name) }))
               : [];
-            const allowed = new Set(accountRows.value.map((x) => x.key));
-            accountSelection.value = accountSelection.value.filter((k) => allowed.has(k));
-            const allowedFiles = new Set(accountInfo.file_options.map((x) => x.value));
-            accountBatchFiles.value = accountBatchFiles.value.filter((k) => allowedFiles.has(k));
+            const allowed = new Map(accountRows.value.map((x) => [x.key, !!x.locked]));
+            accountSelection.value = accountSelection.value.filter((k) => allowed.has(k) && !allowed.get(k));
             if (showSuccess) message.success("账号列表已刷新");
           } finally {
             loading.accounts = false;
@@ -2077,31 +2176,72 @@
         }
 
         function acctSelectAll() {
-          accountSelection.value = accountRows.value.map((x) => x.key);
+          accountSelection.value = accountRows.value
+            .filter((x) => !x.locked)
+            .map((x) => x.key);
         }
 
         function acctSelectNone() {
           accountSelection.value = [];
         }
 
-        function acctSelectByFiles() {
-          if (!accountBatchFiles.value.length) {
-            message.warning("请先选择文件名");
+        function acctSelectByCount() {
+          const n = Math.max(0, Number(accountPickCount.value || 0));
+          if (!n) {
+            message.warning("请先输入勾选数量");
             return;
           }
-          const selectedFiles = new Set(accountBatchFiles.value.map((x) => String(x)));
-          const keys = accountRows.value
-            .filter((row) => {
-              const files = Array.isArray(row.source_files) ? row.source_files : [];
-              return files.some((name) => selectedFiles.has(String(name)));
-            })
-            .map((row) => row.key);
+          const candidates = accountExportableRows();
+          const keys = candidates.slice(0, n).map((row) => row.key);
           if (!keys.length) {
-            message.warning("所选文件下没有可勾选账号");
+            message.warning("没有可勾选账号（已导出/已导入账号不可勾选）");
             return;
           }
-          accountSelection.value = Array.from(new Set([...accountSelection.value, ...keys]));
-          message.success(`已按文件名勾选 ${keys.length} 个账号`);
+          accountSelection.value = keys;
+          if (keys.length < n) {
+            message.warning(`仅可勾选 ${keys.length} 个账号（其余已导出或已导入）`);
+          } else {
+            message.success(`已按数量勾选 ${keys.length} 个账号`);
+          }
+        }
+
+        async function deleteSelectedLocalAccounts() {
+          if (!accountSelection.value.length) {
+            message.warning("请先勾选要删除的账号");
+            return;
+          }
+
+          const emails = accountSelectedEmails(true);
+          if (!emails.length) {
+            message.warning("所选项未包含有效邮箱");
+            return;
+          }
+
+          const preview = emails.slice(0, 12).join("\n");
+          const ok = window.confirm(
+            `将删除以下本地账号（共 ${emails.length} 个）：\n\n${preview}${emails.length > 12 ? "\n…" : ""}\n\n` +
+            "会同时清理 local_accounts.db、accounts.txt 以及 accounts_*.json 中对应账号。此操作不可恢复。"
+          );
+          if (!ok) return;
+
+          loading.local_delete = true;
+          try {
+            const data = await apiRequest("/api/data/accounts/delete", {
+              method: "POST",
+              body: { emails }
+            });
+            accountSelection.value = [];
+            await Promise.all([refreshAccounts(false), refreshJson(false)]);
+            message.success(
+              `删除完成：账号 ${Number(data.deleted || 0)} 条，`
+              + `accounts.txt ${Number(data.removed_txt_lines || 0)} 行，`
+              + `JSON ${Number(data.removed_json_accounts || 0)} 条`
+            );
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.local_delete = false;
+          }
         }
 
         async function syncSelectedAccounts(targetProvider = "") {
@@ -2112,21 +2252,66 @@
           loading.sync = true;
           try {
             await saveConfig(false);
-            const keySet = new Set(accountSelection.value);
-            const emails = accountRows.value
-              .filter((x) => keySet.has(x.key))
-              .map((x) => x.email);
+            const emails = accountSelectedEmails();
             const provider = normalizeRemoteAccountProvider(targetProvider || settingsForm.remote_account_provider || "sub2api");
             const data = await apiRequest("/api/data/sync", {
               method: "POST",
               body: { emails, provider }
             });
+            await refreshAccounts(false);
             const label = provider === "cliproxyapi" ? "cpa" : "sub2api";
             message.success(`导入到${label}结束：成功 ${data.ok}，失败 ${data.fail}`);
           } catch (e) {
             message.error(String(e.message || e));
           } finally {
             loading.sync = false;
+          }
+        }
+
+        async function testSelectedAccountsViaCpa() {
+          if (!accountSelection.value.length) {
+            message.warning("请先勾选账号");
+            return;
+          }
+          loading.local_cpa_test = true;
+          try {
+            await saveConfig(false);
+            const emails = accountSelectedEmails();
+            if (!emails.length) {
+              message.warning("所选行缺少邮箱");
+              return;
+            }
+            const data = await apiRequest("/api/data/cpa/test", {
+              method: "POST",
+              body: { emails }
+            });
+            await refreshAccounts(false);
+            const ok = Number(data.ok || 0);
+            const fail = Number(data.fail || 0);
+            const missing = Array.isArray(data.missing) ? data.missing.length : 0;
+            if (fail === 0) {
+              message.success(
+                `CPA测活完成：成功 ${ok}`
+                + `；并发 ${Number(data.concurrency || 1)}`
+              );
+            } else {
+              const errs = Array.isArray(data.results)
+                ? data.results.filter((x) => !x.success).slice(0, 3)
+                : [];
+              const detail = errs
+                .map((x) => `${String((x && x.email) || "-")}: ${String((x && x.detail) || "测活失败")}`)
+                .join("；");
+              message.warning(
+                `CPA测活完成：成功 ${ok}，失败 ${fail}`
+                + (missing ? `（缺失 ${missing}）` : "")
+                + (detail ? `；原因：${detail}` : "")
+                + `；并发 ${Number(data.concurrency || 1)}`
+              );
+            }
+          } catch (e) {
+            message.error(String(e.message || e));
+          } finally {
+            loading.local_cpa_test = false;
           }
         }
 
@@ -2138,11 +2323,7 @@
           loading.codex_export = true;
           try {
             await saveConfig(false);
-            const keySet = new Set(accountSelection.value);
-            const emails = accountRows.value
-              .filter((x) => keySet.has(x.key))
-              .map((x) => String(x.email || "").trim())
-              .filter((x) => !!x);
+            const emails = accountSelectedEmails();
             if (!emails.length) {
               message.warning("勾选项未包含有效邮箱");
               return;
@@ -2167,6 +2348,7 @@
             if (dir) {
               message.info(`导出目录：${dir}`);
             }
+            await refreshAccounts(false);
           } catch (e) {
             message.error(String(e.message || e));
           } finally {
@@ -2908,9 +3090,11 @@
           jsonInfo,
           accountRows,
           accountSelection,
-          accountBatchFiles,
+          accountPickCount,
           accountInfo,
           accountManageTab,
+          showSub2ApiExportModal,
+          sub2apiExportForm,
           remoteRows,
           remoteSelection,
           remoteSearch,
@@ -2956,7 +3140,7 @@
           flclashProbeColumns,
           jsonColumns,
           accountColumns,
-          remoteColumns,
+          remoteTableColumns,
           mailboxColumns,
           mailColumns,
           rowKeyPath,
@@ -2992,8 +3176,12 @@
           deleteSelectedJson,
           acctSelectAll,
           acctSelectNone,
-          acctSelectByFiles,
+          acctSelectByCount,
+          deleteSelectedLocalAccounts,
           syncSelectedAccounts,
+          testSelectedAccountsViaCpa,
+          openSub2ApiExportModal,
+          confirmExportSub2Api,
           exportSelectedCodeX,
           refreshMailOverview,
           refreshGraphAccountFiles,

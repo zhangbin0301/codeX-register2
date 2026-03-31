@@ -201,6 +201,36 @@
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
     }
 
+    .account-manage-card {
+      background: var(--card);
+    }
+
+    .account-manage-tabs .n-tabs-nav {
+      border: 1px solid rgba(75, 101, 129, 0.38);
+      border-radius: 10px;
+      background: rgba(14, 23, 35, 0.72);
+      padding: 3px;
+      margin-bottom: 8px;
+    }
+
+    .account-manage-tabs .n-tabs-tab {
+      border-radius: 8px;
+      min-height: 34px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #b7cbe0;
+    }
+
+    .account-manage-tabs .n-tabs-tab:hover {
+      color: #deedfd;
+      background: rgba(44, 63, 87, 0.26);
+    }
+
+    .account-manage-tabs .n-tabs-tab.n-tabs-tab--active {
+      color: #edf6ff;
+      background: rgba(62, 166, 255, 0.22);
+    }
+
     .dash-grid {
       display: grid;
       grid-template-columns: 2fr 1fr;
@@ -238,6 +268,7 @@
     .toolbar-btn {
       min-width: 102px;
       height: 34px;
+      border-radius: 8px;
     }
 
     .toolbar-select {
@@ -258,13 +289,65 @@
       min-height: 34px;
     }
 
+    .account-local-toolbar,
     .remote-toolbar {
       margin-bottom: 8px;
       align-items: center;
     }
 
+    .account-cta-group {
+      margin-left: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .btn-import-cpa.n-button:not(.n-button--disabled) {
+      background: rgba(56, 190, 118, 0.92);
+      border-color: rgba(111, 220, 157, 0.82);
+      color: #062113;
+    }
+
     .remote-provider-tabs {
       margin-bottom: 8px;
+    }
+
+    .remote-provider-tabs .n-tabs-nav {
+      border: 1px solid rgba(74, 102, 133, 0.34);
+      border-radius: 10px;
+      background: rgba(14, 24, 38, 0.62);
+      padding: 3px;
+    }
+
+    .remote-provider-tabs .n-tabs-tab {
+      min-height: 34px;
+      border-radius: 8px;
+      color: #abc0d6;
+      font-weight: 600;
+    }
+
+    .remote-provider-tabs .n-tabs-tab:hover {
+      color: #d8eaff;
+      background: rgba(54, 75, 102, 0.22);
+    }
+
+    .remote-provider-tabs .n-tabs-tab.n-tabs-tab--active {
+      color: #ecf8ff;
+      background: rgba(62, 166, 255, 0.2);
+    }
+
+    .remote-provider-note {
+      margin-top: 6px;
+      margin-bottom: 8px;
+    }
+
+    .remote-provider-note code {
+      color: #bfe4ff;
+    }
+
+    .remote-table .n-data-table-th,
+    .remote-table .n-data-table-td {
+      white-space: nowrap;
     }
 
     .remote-search {
@@ -624,6 +707,11 @@
       }
 
       .header-status {
+        width: 100%;
+      }
+
+      .account-cta-group {
+        margin-left: 0;
         width: 100%;
       }
     }

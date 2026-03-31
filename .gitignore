@@ -4,5 +4,6 @@
 .cursor
 __pycache__/
 *.txt
+*.db
 gui_config.json
 !gui_config.example.json

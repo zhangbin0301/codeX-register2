@@ -140,20 +140,18 @@
                   </div>
 
                   <div v-else-if="activeTab === 'accounts'" class="tab-page">
-                    <n-card class="glass-card" title="账号管理" size="small">
-                      <n-tabs type="segment" :value="accountManageTab" @update:value="accountManageTab = $event">
+                    <n-card class="glass-card account-manage-card" title="账号管理" size="small">
+                      <n-tabs class="account-manage-tabs" type="segment" :value="accountManageTab" @update:value="accountManageTab = $event">
                         <n-tab-pane name="local" tab="导入账号">
                           <div class="meta">本地账号：{{ accountInfo.total }} 个 · {{ accountInfo.path }}</div>
-                          <div class="toolbar">
+                          <div class="toolbar account-local-toolbar">
                             <n-button class="toolbar-btn" @click="refreshAccounts(true)">刷新</n-button>
-                            <n-select
-                              class="toolbar-select"
-                              v-model:value="accountBatchFiles"
-                              :options="accountInfo.file_options"
-                              multiple
-                              clearable
-                              :max-tag-count="1"
-                              placeholder="按文件名批量勾选"
+                            <n-input-number
+                              v-model:value="accountPickCount"
+                              :min="1"
+                              :step="1"
+                              style="width: 180px"
+                              placeholder="按数量勾选"
                             />
                             <n-input
                               class="toolbar-path"
@@ -162,12 +160,17 @@
                               placeholder="CodeX 导出目录（必填）"
                             />
                             <n-button class="toolbar-btn" :loading="loading.save" @click="saveConfig(true)">保存目录</n-button>
-                            <n-button class="toolbar-btn" @click="acctSelectByFiles">按文件勾选</n-button>
+                            <n-button class="toolbar-btn" @click="acctSelectByCount">按数量勾选</n-button>
                             <n-button class="toolbar-btn" @click="acctSelectAll">全选</n-button>
                             <n-button class="toolbar-btn" @click="acctSelectNone">全不选</n-button>
-                            <n-button class="toolbar-btn" type="primary" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('sub2api')">导入到sub2api</n-button>
-                            <n-button class="toolbar-btn" type="primary" ghost :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('cliproxyapi')">导入到cpa</n-button>
-                            <n-button class="toolbar-btn" type="warning" :loading="loading.codex_export" :disabled="!accountSelection.length" @click="exportSelectedCodeX">导出为CPA可用文件</n-button>
+                            <n-button class="toolbar-btn" type="error" ghost :loading="loading.local_delete" :disabled="!accountSelection.length" @click="deleteSelectedLocalAccounts">删除已选账号</n-button>
+                            <div class="account-cta-group">
+                              <n-button class="toolbar-btn" type="primary" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('sub2api')">导入到sub2api</n-button>
+                              <n-button class="toolbar-btn btn-import-cpa" type="success" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('cliproxyapi')">导入到cpa</n-button>
+                              <n-button class="toolbar-btn" type="success" ghost :loading="loading.local_cpa_test" @click="testSelectedAccountsViaCpa">CPA测活(不导入)</n-button>
+                              <n-button class="toolbar-btn" type="info" :loading="loading.sub2api_export" :disabled="!accountSelection.length" @click="openSub2ApiExportModal">导出为Sub2API可用文件</n-button>
+                              <n-button class="toolbar-btn" type="warning" :loading="loading.codex_export" :disabled="!accountSelection.length" @click="exportSelectedCodeX">导出为CPA可用文件</n-button>
+                            </div>
                           </div>
                           <div class="account-table-wrap">
                             <n-data-table
@@ -199,10 +202,10 @@
                               <span style="display:none"></span>
                             </n-tab-pane>
                           </n-tabs>
-                          <div v-if="settingsForm.remote_account_provider === 'cliproxyapi'" class="meta" style="margin-top: 6px">
+                          <div v-if="settingsForm.remote_account_provider === 'cliproxyapi'" class="meta remote-provider-note">
                             CLIProxyAPI 使用 Management API 的 <code>/auth-files</code> 体系进行列表、导入、测活与刷新。
                           </div>
-                          <div v-else class="meta" style="margin-top: 6px">
+                          <div v-else class="meta remote-provider-note">
                             Sub2API 使用账号列表接口进行分页拉取、测活、刷新、复活与分组管理。
                           </div>
                           <div class="toolbar remote-toolbar">
@@ -257,7 +260,7 @@
                             size="small"
                             table-layout="fixed"
                             :single-line="false"
-                            :columns="remoteColumns"
+                            :columns="remoteTableColumns"
                             :data="remoteRows"
                             :row-key="rowKeyRemote"
                             :row-class-name="remoteRowClassName"
@@ -266,6 +269,44 @@
                         </n-tab-pane>
                       </n-tabs>
                     </n-card>
+
+                    <n-modal
+                      v-model:show="showSub2ApiExportModal"
+                      preset="card"
+                      title="导出 Sub2API 文件"
+                      style="width: min(520px, 92vw)"
+                    >
+                      <n-form label-placement="left" label-width="120">
+                        <n-form-item label="已勾选账号">
+                          <n-tag type="info" bordered="false">{{ accountSelection.length }} 个</n-tag>
+                        </n-form-item>
+                        <n-form-item label="导出文件数">
+                          <n-input-number
+                            v-model:value="sub2apiExportForm.file_count"
+                            :min="1"
+                            :max="999"
+                            :step="1"
+                            style="width: 180px"
+                          />
+                        </n-form-item>
+                        <n-form-item label="每文件账号数">
+                          <n-input-number
+                            v-model:value="sub2apiExportForm.accounts_per_file"
+                            :min="1"
+                            :max="9999"
+                            :step="1"
+                            style="width: 180px"
+                          />
+                        </n-form-item>
+                        <div class="meta">提示：文件数 × 每文件账号数 需覆盖当前勾选账号总数。</div>
+                      </n-form>
+                      <template #footer>
+                        <n-space justify="end">
+                          <n-button :disabled="loading.sub2api_export" @click="showSub2ApiExportModal = false">取消</n-button>
+                          <n-button type="primary" :loading="loading.sub2api_export" @click="confirmExportSub2Api">确定导出</n-button>
+                        </n-space>
+                      </template>
+                    </n-modal>
 
                     <n-modal
                       v-model:show="showRemoteGroupModal"

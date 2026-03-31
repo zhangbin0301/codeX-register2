@@ -59,6 +59,7 @@
   "mail_domain_error_counts": {},
   "mail_domain_registered_counts": {},
   "json_file_notes": {},
+  "local_cpa_test_state": {},
   "mailfree_random_domain": true,
   "mailbox_custom_enabled": false,
   "mailbox_prefix": "",
