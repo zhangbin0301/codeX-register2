@@ -267,9 +267,10 @@ def _make_api_handler(service, index_html: str):
                 if path == "/api/remote/delete-batch":
                     payload = self._read_json_body()
                     ids = payload.get("ids") or []
+                    delete_local = bool(payload.get("delete_local"))
                     if not isinstance(ids, list):
                         raise ValueError("ids 必须为数组")
-                    self._ok(service.delete_remote_accounts(ids))
+                    self._ok(service.delete_remote_accounts(ids, delete_local=delete_local))
                     return
 
                 if path == "/api/remote/groups":

@@ -29,6 +29,23 @@ def _parse_domain_csv(raw: Any) -> list[str]:
     return list(dict.fromkeys([x for x in rows if x]))
 
 
+def _normalize_domain_value(raw: Any) -> str:
+    if isinstance(raw, dict):
+        for key in ("domain", "name", "hostname", "host", "value"):
+            val = str(raw.get(key) or "").strip().lower()
+            if val:
+                raw = val
+                break
+        else:
+            raw = ""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    if "@" in text:
+        text = text.split("@", 1)[1].strip().lower()
+    return text
+
+
 def _normalize_local_prefix(raw: Any) -> str:
     prefix = str(raw or "").strip()
     if not prefix:
@@ -273,7 +290,8 @@ class CloudflareTempEmailService(MailServiceBase):
                     for key in ("DOMAINS", "DEFAULT_DOMAINS", "domains", "default_domains"):
                         arr = cfg.get(key)
                         if isinstance(arr, list):
-                            domain_rows = [str(x or "").strip().lower() for x in arr if str(x or "").strip()]
+                            domain_rows = [_normalize_domain_value(x) for x in arr]
+                            domain_rows = [x for x in domain_rows if x]
                             if domain_rows:
                                 break
         except Exception:
@@ -290,16 +308,29 @@ class CloudflareTempEmailService(MailServiceBase):
                 continue
             payload = self._json_or_none(resp)
             if isinstance(payload, list):
-                domain_rows = [str(x or "").strip().lower() for x in payload if str(x or "").strip()]
+                domain_rows = [_normalize_domain_value(x) for x in payload]
+                domain_rows = [x for x in domain_rows if x]
             elif isinstance(payload, dict):
                 arr = payload.get("domains") or payload.get("data") or payload.get("items") or []
                 if isinstance(arr, list):
-                    domain_rows = [str(x or "").strip().lower() for x in arr if str(x or "").strip()]
+                    domain_rows = [_normalize_domain_value(x) for x in arr]
+                    domain_rows = [x for x in domain_rows if x]
             if domain_rows:
                 break
 
+        cfg_domain_rows = _parse_domain_csv(os.getenv("MAIL_DOMAINS", ""))
+        if cfg_domain_rows:
+            merged = list(domain_rows)
+            merged_set = {str(x or "").strip().lower() for x in merged if str(x or "").strip()}
+            for d in cfg_domain_rows:
+                dm = str(d or "").strip().lower()
+                if dm and dm not in merged_set:
+                    merged.append(dm)
+                    merged_set.add(dm)
+            domain_rows = merged
+
         if not domain_rows:
-            domain_rows = _parse_domain_csv(os.getenv("MAIL_DOMAINS", ""))
+            domain_rows = cfg_domain_rows
 
         self._domains_cache = list(dict.fromkeys([x for x in domain_rows if x]))
         return list(self._domains_cache)

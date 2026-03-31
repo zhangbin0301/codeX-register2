@@ -6,8 +6,8 @@
           { label: "SMS管理", key: "sms" },
           { label: "服务设置", key: "settings" },
           { label: "代理服务", key: "proxy" },
-          { label: "关于", key: "about" },
-          { label: "运行日志", key: "logs" }
+          { label: "运行日志", key: "logs" },
+          { label: "关于", key: "about" }
         ];
 
         const themeOverrides = {
@@ -86,7 +86,6 @@
 
         const dashForm = Vue.reactive({
           num_accounts: 1,
-          num_files: 1,
           concurrency: 1,
           sleep_min: 5,
           sleep_max: 30,
@@ -163,7 +162,6 @@
           accounts: false,
           local_delete: false,
           sync: false,
-          local_cpa_test: false,
           sub2api_export: false,
           codex_export: false,
           remote: false,
@@ -196,6 +194,7 @@
 
         const accountRows = Vue.ref([]);
         const accountSelection = Vue.ref([]);
+        const accountSearch = Vue.ref("");
         const accountPickCount = Vue.ref(20);
         const accountInfo = Vue.reactive({ total: 0, path: "local_accounts.db", file_options: [] });
         const accountManageTab = Vue.ref("local");
@@ -237,6 +236,10 @@
         const remoteRows = Vue.ref([]);
         const remoteSelection = Vue.ref([]);
         const remoteSearch = Vue.ref("");
+        const showRemoteDeleteModal = Vue.ref(false);
+        const remoteDeleteAlsoLocal = Vue.ref(false);
+        const remoteDeleteIds = Vue.ref([]);
+        const remoteDeletePreview = Vue.ref("");
         const showRemoteGroupModal = Vue.ref(false);
         const remoteGroupOptions = Vue.ref([]);
         const remoteGroupSelection = Vue.ref([]);
@@ -470,8 +473,7 @@
 
         const totalPlanCount = Vue.computed(() => {
           const perFile = Math.max(1, Number(dashForm.num_accounts || 1));
-          const files = Math.max(1, Number(dashForm.num_files || 1));
-          return perFile * files;
+          return perFile;
         });
 
         const statusTagType = Vue.computed(() => {
@@ -981,12 +983,12 @@
           { title: "邮箱", key: "email", minWidth: 220, ellipsis: { tooltip: true } },
           { title: "密码", key: "password", width: 150, ellipsis: { tooltip: true } },
           {
-            title: "测活",
-            key: "test_status",
-            width: 90,
+            title: "状态",
+            key: "cloud_test_status",
+            width: 100,
             render(row) {
-              const s = String(row.test_status || "未测").trim();
-              const detail = String(row.test_result || "-").trim();
+              const s = String(row.cloud_test_status || "未测").trim();
+              const detail = String(row.cloud_test_result || "-").trim();
               if (s === "成功") {
                 return Vue.h(
                   naive.NTag,
@@ -994,7 +996,7 @@
                   { default: () => "成功" }
                 );
               }
-              if (s === "失败") {
+              if (s === "失败" || s === "刷新失败" || s === "封禁" || s === "Token过期" || s === "429限流") {
                 return Vue.h(
                   naive.NTag,
                   { type: "error", size: "small", bordered: false, title: detail },
@@ -1030,6 +1032,17 @@
             }
           }
         ];
+
+        const accountFilteredRows = Vue.computed(() => {
+          const kw = String(accountSearch.value || "").trim().toLowerCase();
+          if (!kw) return accountRows.value;
+          return accountRows.value.filter((row) => {
+            const email = String((row && row.email) || "").toLowerCase();
+            const note = String((row && row.note) || "").toLowerCase();
+            const cloud = String((row && row.cloud_test_status) || "").toLowerCase();
+            return email.includes(kw) || note.includes(kw) || cloud.includes(kw);
+          });
+        });
 
         function accountExportableRows() {
           return accountRows.value.filter((x) => !x.locked);
@@ -1110,26 +1123,9 @@
 
         const remoteColumns = [
           { type: "selection", multiple: true },
-          { title: "ID", key: "id", width: 180, ellipsis: { tooltip: true } },
+          { title: "ID", key: "id", width: 92, ellipsis: { tooltip: true } },
           { title: "名称/邮箱", key: "name", minWidth: 280, ellipsis: { tooltip: true } },
-          {
-            title: "重复",
-            key: "is_dup",
-            width: 70,
-            render(row) {
-              if (!row.is_dup) {
-                return Vue.h("span", { style: "color:#6b839f;" }, "-");
-              }
-              return Vue.h(
-                naive.NTag,
-                { type: "error", size: "small", bordered: false },
-                { default: () => "重复" }
-              );
-            }
-          },
           { title: "平台", key: "platform", width: 76 },
-          { title: "类型", key: "type", width: 72 },
-          { title: "状态", key: "status", width: 76 },
           { title: "分组", key: "groups", minWidth: 260, ellipsis: { tooltip: true } },
           { title: "5h", key: "u5h", width: 72 },
           { title: "7d", key: "u7d", width: 72 },
@@ -1339,7 +1335,6 @@
 
         function assignConfig(cfg) {
           dashForm.num_accounts = Number(cfg.num_accounts || 1);
-          dashForm.num_files = Number(cfg.num_files || 1);
           dashForm.concurrency = Number(cfg.concurrency || 1);
           dashForm.sleep_min = Number(cfg.sleep_min || 5);
           dashForm.sleep_max = Number(cfg.sleep_max || 30);
@@ -1416,7 +1411,7 @@
         function buildPayload() {
           return {
             num_accounts: Number(dashForm.num_accounts || 1),
-            num_files: Number(dashForm.num_files || 1),
+            num_files: 1,
             concurrency: Number(dashForm.concurrency || 1),
             sleep_min: Number(dashForm.sleep_min || 5),
             sleep_max: Number(dashForm.sleep_max || 30),
@@ -2045,6 +2040,7 @@
               body: { ids }
             });
             await loadRemoteCache();
+            await refreshAccounts(false);
             const ok = Number(data.ok || 0);
             const fail = Number(data.fail || 0);
             if (fail === 0) {
@@ -2081,6 +2077,7 @@
               body: { ids }
             });
             await loadRemoteCache();
+            await refreshAccounts(false);
             const ok = Number(data.ok || 0);
             const fail = Number(data.fail || 0);
             const apis = Array.isArray(data.api_summary)
@@ -2147,6 +2144,7 @@
               body: { ids: tokenRows.map((x) => String(x.id || "").trim()) }
             });
             await loadRemoteCache();
+            await refreshAccounts(false);
 
             const ok = Number(data.ok || 0);
             const fail = Number(data.fail || 0);
@@ -2200,17 +2198,28 @@
             .map((x) => String(x.name || x.id || ""))
             .slice(0, 10)
             .join("\n");
-          const ok = window.confirm(
-            `将删除以下服务端账号（共 ${ids.length} 个）：\n\n${names}${ids.length > 10 ? "\n…" : ""}\n\n此操作不可恢复。`
-          );
-          if (!ok) return;
+          remoteDeleteIds.value = ids;
+          remoteDeleteAlsoLocal.value = false;
+          remoteDeletePreview.value = names + (ids.length > 10 ? "\n…" : "");
+          showRemoteDeleteModal.value = true;
+        }
+
+        async function confirmRemoteDeleteAccounts() {
+          const ids = Array.isArray(remoteDeleteIds.value) ? remoteDeleteIds.value.slice() : [];
+          if (!ids.length) {
+            message.warning("请先勾选要删除的账号");
+            return;
+          }
 
           loading.remote_delete = true;
           try {
             await saveConfig(false);
             const data = await apiRequest("/api/remote/delete-batch", {
               method: "POST",
-              body: { ids }
+              body: {
+                ids,
+                delete_local: !!remoteDeleteAlsoLocal.value
+              }
             });
 
             let refreshOk = true;
@@ -2224,10 +2233,16 @@
               refreshOk = false;
             }
             await refreshAccounts(false);
+            showRemoteDeleteModal.value = false;
+            remoteDeleteIds.value = [];
 
             if (Number(data.fail || 0) === 0) {
               if (refreshOk) {
-                message.success(`删除完成：成功 ${data.ok}，列表已自动刷新`);
+                message.success(
+                  `删除完成：成功 ${data.ok}`
+                  + (remoteDeleteAlsoLocal.value ? `，本地数据库删除 ${Number(data.local_deleted || 0)} 条` : "")
+                  + "，列表已自动刷新"
+                );
               } else {
                 message.warning(`删除完成：成功 ${data.ok}，但自动刷新失败，请手动点“获取列表与额度”`);
               }
@@ -2445,69 +2460,38 @@
             message.warning("请先勾选账号");
             return;
           }
+          const provider = normalizeRemoteAccountProvider(targetProvider || settingsForm.remote_account_provider || "sub2api");
+          const label = provider === "cliproxyapi" ? "CPA" : "Sub2API";
+          const selectedKeySet = new Set(accountSelection.value);
+          const selectedRows = accountRows.value
+            .filter((x) => selectedKeySet.has(x.key) && !x.locked);
+          const emailsPreview = selectedRows
+            .map((x) => String(x.email || ""))
+            .filter((x) => x)
+            .slice(0, 12)
+            .join("\n");
+          const confirmText =
+            `将导入到 ${label}（共 ${selectedRows.length} 个账号）：\n\n`
+            + `${emailsPreview}${selectedRows.length > 12 ? "\n…" : ""}`
+            + "\n\n确认继续吗？";
+          if (!window.confirm(confirmText)) {
+            return;
+          }
           loading.sync = true;
           try {
             await saveConfig(false);
             const emails = accountSelectedEmails();
-            const provider = normalizeRemoteAccountProvider(targetProvider || settingsForm.remote_account_provider || "sub2api");
             const data = await apiRequest("/api/data/sync", {
               method: "POST",
               body: { emails, provider }
             });
             await refreshAccounts(false);
-            const label = provider === "cliproxyapi" ? "cpa" : "sub2api";
-            message.success(`导入到${label}结束：成功 ${data.ok}，失败 ${data.fail}`);
+            const lowerLabel = provider === "cliproxyapi" ? "cpa" : "sub2api";
+            message.success(`导入到${lowerLabel}结束：成功 ${data.ok}，失败 ${data.fail}`);
           } catch (e) {
             message.error(String(e.message || e));
           } finally {
             loading.sync = false;
-          }
-        }
-
-        async function testSelectedAccountsViaCpa() {
-          if (!accountSelection.value.length) {
-            message.warning("请先勾选账号");
-            return;
-          }
-          loading.local_cpa_test = true;
-          try {
-            await saveConfig(false);
-            const emails = accountSelectedEmails();
-            if (!emails.length) {
-              message.warning("所选行缺少邮箱");
-              return;
-            }
-            const data = await apiRequest("/api/data/cpa/test", {
-              method: "POST",
-              body: { emails }
-            });
-            await refreshAccounts(false);
-            const ok = Number(data.ok || 0);
-            const fail = Number(data.fail || 0);
-            const missing = Array.isArray(data.missing) ? data.missing.length : 0;
-            if (fail === 0) {
-              message.success(
-                `CPA测活完成：成功 ${ok}`
-                + `；并发 ${Number(data.concurrency || 1)}`
-              );
-            } else {
-              const errs = Array.isArray(data.results)
-                ? data.results.filter((x) => !x.success).slice(0, 3)
-                : [];
-              const detail = errs
-                .map((x) => `${String((x && x.email) || "-")}: ${String((x && x.detail) || "测活失败")}`)
-                .join("；");
-              message.warning(
-                `CPA测活完成：成功 ${ok}，失败 ${fail}`
-                + (missing ? `（缺失 ${missing}）` : "")
-                + (detail ? `；原因：${detail}` : "")
-                + `；并发 ${Number(data.concurrency || 1)}`
-              );
-            }
-          } catch (e) {
-            message.error(String(e.message || e));
-          } finally {
-            loading.local_cpa_test = false;
           }
         }
 
@@ -3290,6 +3274,8 @@
           jsonInfo,
           accountRows,
           accountSelection,
+          accountSearch,
+          accountFilteredRows,
           accountPickCount,
           accountInfo,
           accountManageTab,
@@ -3300,6 +3286,9 @@
           remoteRows,
           remoteSelection,
           remoteSearch,
+          showRemoteDeleteModal,
+          remoteDeleteAlsoLocal,
+          remoteDeletePreview,
           showRemoteGroupModal,
           remoteGroupOptions,
           remoteGroupSelection,
@@ -3373,6 +3362,7 @@
           refreshSelectedRemoteAccounts,
           reviveSelectedRemoteAccounts,
           deleteSelectedRemoteAccounts,
+          confirmRemoteDeleteAccounts,
           jsonSelectAll,
           jsonSelectNone,
           deleteSelectedJson,
@@ -3381,7 +3371,6 @@
           acctSelectByCount,
           deleteSelectedLocalAccounts,
           syncSelectedAccounts,
-          testSelectedAccountsViaCpa,
           openSub2ApiExportModal,
           confirmExportSub2Api,
           exportSelectedCodeX,

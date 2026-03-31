@@ -43,13 +43,10 @@
                     <div class="dash-grid">
                       <div>
                         <n-form label-placement="left" label-width="96" :model="dashForm">
-                          <n-form-item label="每文件注册数">
+                          <n-form-item label="计划注册数">
                             <n-input-number v-model:value="dashForm.num_accounts" :min="1" style="width: 220px" />
                           </n-form-item>
-                          <n-form-item label="文件数量">
-                            <n-input-number v-model:value="dashForm.num_files" :min="1" :max="200" style="width: 220px" />
-                          </n-form-item>
-                          <n-form-item label="当前文件并发">
+                          <n-form-item label="注册并发">
                             <n-input-number v-model:value="dashForm.concurrency" :min="1" :max="6" style="width: 220px" />
                           </n-form-item>
                           <n-form-item label="冷却最小(秒)">
@@ -69,7 +66,7 @@
                           <n-button type="primary" :loading="loading.start" :disabled="status.running" @click="startRun">开始注册</n-button>
                           <n-button type="warning" ghost :disabled="!status.running" @click="stopRun">停止</n-button>
                           <n-button secondary :loading="loading.save" @click="saveConfig(true)">保存配置</n-button>
-                          <n-tag type="info" :bordered="false">计划总数 {{ totalPlanCount }}</n-tag>
+                          <n-tag type="info" :bordered="false">计划注册 {{ totalPlanCount }}</n-tag>
                         </div>
 
                         <n-alert
@@ -99,12 +96,12 @@
                       <div>
                         <n-alert type="info" title="运行说明" :show-icon="false">
                           启动后会在后台按配置调用 r_with_pwd.run，日志实时出现在底部。<br />
-                          会按“文件数量 × 每文件注册数”分批创建 accounts_*.json；失败会自动补位，尽量补齐每个文件目标。<br />
+                          会按“计划注册数”执行注册任务并写入本地账号库；失败会自动补位直到达到目标或触发停止条件。<br />
                           建议先保存配置，再开始任务；停止后可在「账号管理」页继续管理导出与同步。
                         </n-alert>
                         <n-alert style="margin-top: 10px" type="success" title="提速建议" :show-icon="false">
-                          并发仅作用于当前文件，建议 2~3；冷却 1~3 秒；开启加速模式可缩短 OTP 轮询与网络退避等待。<br />
-                          若启用 FlClash 动态换 IP，将自动跳过香港节点；并发时同一批任务共享同一节点，批次结束后再切换。
+                          建议并发 2~3；冷却 1~3 秒；开启加速模式可缩短 OTP 轮询与网络退避等待。<br />
+                          若启用 FlClash 动态换 IP，将自动跳过香港节点；并发批次任务共享同一节点，批次结束后再切换。
                         </n-alert>
                         <n-alert style="margin-top: 10px" type="warning" title="网络提醒" :show-icon="false">
                           若管理端/API 访问失败，请确认代理地址与证书校验开关是否匹配当前网络。
@@ -121,6 +118,12 @@
                           <div class="meta">本地账号：{{ accountInfo.total }} 个 · {{ accountInfo.path }}</div>
                           <div class="toolbar account-local-toolbar">
                             <n-button class="toolbar-btn" @click="refreshAccounts(true)">刷新</n-button>
+                            <n-input
+                              class="remote-search"
+                              v-model:value="accountSearch"
+                              clearable
+                              placeholder="搜索邮箱/备注/状态"
+                            />
                             <n-input-number
                               v-model:value="accountPickCount"
                               :min="1"
@@ -142,7 +145,6 @@
                             <div class="account-cta-group">
                               <n-button class="toolbar-btn" type="primary" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('sub2api')">导入到sub2api</n-button>
                               <n-button class="toolbar-btn btn-import-cpa" type="success" :loading="loading.sync || status.sync_busy" @click="syncSelectedAccounts('cliproxyapi')">导入到cpa</n-button>
-                              <n-button class="toolbar-btn" type="success" ghost :loading="loading.local_cpa_test" @click="testSelectedAccountsViaCpa">CPA测活(不导入)</n-button>
                               <n-button class="toolbar-btn" type="info" :loading="loading.sub2api_export" :disabled="!accountSelection.length" @click="openSub2ApiExportModal">导出为Sub2API可用文件</n-button>
                               <n-button class="toolbar-btn" type="warning" :loading="loading.codex_export" :disabled="!accountSelection.length" @click="exportSelectedCodeX">导出为CPA可用文件</n-button>
                             </div>
@@ -154,7 +156,7 @@
                               table-layout="fixed"
                               :single-line="false"
                               :columns="accountColumns"
-                              :data="accountRows"
+                              :data="accountFilteredRows"
                               :row-key="rowKeyAccount"
                               :row-class-name="accountRowClassName"
                               :max-height="430"
@@ -279,6 +281,33 @@
                         <n-space justify="end">
                           <n-button :disabled="loading.sub2api_export" @click="showSub2ApiExportModal = false">取消</n-button>
                           <n-button type="primary" :loading="loading.sub2api_export" @click="confirmExportSub2Api">确定导出</n-button>
+                        </n-space>
+                      </template>
+                    </n-modal>
+
+                    <n-modal
+                      v-model:show="showRemoteDeleteModal"
+                      preset="card"
+                      title="确认删除云端账号"
+                      :mask-closable="!loading.remote_delete"
+                      style="width: min(620px, 92vw)"
+                    >
+                      <n-form label-placement="left" label-width="120">
+                        <n-form-item label="删除账号">
+                          <pre style="margin:0; white-space: pre-wrap; word-break: break-word">{{ remoteDeletePreview }}</pre>
+                        </n-form-item>
+                        <n-form-item label="附加操作">
+                          <n-space align="center" :size="10">
+                            <n-switch v-model:value="remoteDeleteAlsoLocal" />
+                            <span class="about-value">同时删除本地数据库中的对应账号</span>
+                          </n-space>
+                        </n-form-item>
+                        <div class="meta">此操作不可恢复，请确认后执行。</div>
+                      </n-form>
+                      <template #footer>
+                        <n-space justify="end">
+                          <n-button :disabled="loading.remote_delete" @click="showRemoteDeleteModal = false">取消</n-button>
+                          <n-button type="error" :loading="loading.remote_delete" @click="confirmRemoteDeleteAccounts">确认删除</n-button>
                         </n-space>
                       </template>
                     </n-modal>

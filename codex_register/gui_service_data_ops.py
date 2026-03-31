@@ -675,6 +675,14 @@ def _extract_access_token_from_account_json(raw: Any) -> str:
     return _extract_access_token_from_account_obj(payload)
 
 
+def _extract_email_like_text(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    m = re.search(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", text)
+    return str(m.group(0)).strip() if m else ""
+
+
 def _account_to_codex_record(acc: dict[str, Any]) -> dict[str, str]:
     creds = acc.get("credentials") if isinstance(acc.get("credentials"), dict) else {}
     extra = acc.get("extra") if isinstance(acc.get("extra"), dict) else {}
@@ -1098,6 +1106,31 @@ def list_accounts(service) -> dict[str, Any]:
         remote_ready = service._remote_sync_status_ready
         remote_counts = dict(service._remote_email_counts)
         local_test_state = dict(service._local_cpa_test_state)
+        remote_rows_snapshot = [dict(x) for x in (service._remote_rows or [])]
+
+    remote_test_by_email: dict[str, dict[str, str]] = {}
+    for rr in remote_rows_snapshot:
+        em = _extract_email_like_text(
+            rr.get("email")
+            or rr.get("name")
+            or rr.get("groups")
+            or rr.get("file_name")
+        )
+        if not em:
+            continue
+        status = str(rr.get("test_status") or "未测").strip() or "未测"
+        detail = str(rr.get("test_result") or "-").strip() or "-"
+        prev = remote_test_by_email.get(em)
+        if prev is None:
+            remote_test_by_email[em] = {"status": status, "detail": detail}
+            continue
+
+        prev_s = str(prev.get("status") or "").strip()
+        # 失败态优先覆盖，确保本地能及时看到云端失败。
+        prev_is_fail = prev_s in {"失败", "刷新失败", "封禁", "Token过期", "429限流"}
+        now_is_fail = status in {"失败", "刷新失败", "封禁", "Token过期", "429限流"}
+        if now_is_fail or (not prev_is_fail and prev_s in {"未测", "", "未测试"}):
+            remote_test_by_email[em] = {"status": status, "detail": detail}
 
     items: list[dict[str, Any]] = []
     for i, row in enumerate(db_rows, start=1):
@@ -1129,6 +1162,7 @@ def list_accounts(service) -> dict[str, Any]:
             else:
                 status = "pending"
         test_state = local_test_state.get(ep) or {}
+        cloud_state = remote_test_by_email.get(ep) or {}
         access_token = _extract_access_token_from_account_json(
             (row or {}).get("account_json")
         )
@@ -1148,6 +1182,8 @@ def list_accounts(service) -> dict[str, Any]:
                 "test_status": str(test_state.get("status") or "未测"),
                 "test_result": str(test_state.get("result") or "-"),
                 "test_at": str(test_state.get("at") or "-"),
+                "cloud_test_status": str(cloud_state.get("status") or "未测"),
+                "cloud_test_result": str(cloud_state.get("detail") or "-"),
                 "access_token": access_token,
                 "source": source_text,
                 "source_files": src_files,
@@ -1261,6 +1297,46 @@ def delete_local_accounts(service, emails: list[Any]) -> dict[str, Any]:
         "removed_json_accounts": removed_json_accounts,
         "touched_json_files": touched_json_files,
     }
+
+
+def delete_local_accounts_db_only(service, emails: list[Any]) -> dict[str, Any]:
+    """仅删除 SQLite 本地账号（不触碰 accounts.txt 与 accounts_*.json）。"""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in emails:
+        em = str(raw or "").strip().lower()
+        if not em or em in seen:
+            continue
+        seen.add(em)
+        ordered.append(em)
+    if not ordered:
+        return {"deleted": 0}
+
+    db_path, _ = _sync_local_accounts_sqlite(service)
+    placeholders = ",".join(["?"] * len(ordered))
+    deleted_db_rows = 0
+    with sqlite3.connect(db_path, timeout=30) as conn:
+        _ensure_local_accounts_table(conn)
+        deleted_db_rows = int(
+            conn.execute(
+                f"DELETE FROM local_accounts WHERE lower(email) IN ({placeholders})",
+                tuple(ordered),
+            ).rowcount
+        )
+        conn.commit()
+
+    with service._lock:
+        changed = False
+        for em in ordered:
+            if em in service._local_cpa_test_state:
+                service._local_cpa_test_state.pop(em, None)
+                changed = True
+        if changed:
+            service.cfg["local_cpa_test_state"] = dict(service._local_cpa_test_state)
+            save_config(service.cfg)
+
+    service.log(f"仅数据库删除本地账号完成：{deleted_db_rows} 条")
+    return {"deleted": deleted_db_rows}
 
 
 def delete_json_files(service, paths: list[str]) -> dict[str, Any]:
@@ -1687,6 +1763,7 @@ __all__ = [
     "build_email_source_files_map",
     "build_local_account_index",
     "delete_local_accounts",
+    "delete_local_accounts_db_only",
     "delete_json_files",
     "email_from_account_entry",
     "emails_from_accounts_json",

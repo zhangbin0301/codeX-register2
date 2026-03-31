@@ -676,54 +676,105 @@ def _batch_test_remote_accounts_cliproxy(service, ordered_ids: list[str]) -> dic
         )
         state_lock = threading.Lock()
 
-        def _run_one(aid: str) -> tuple[bool, str, int]:
+        def _run_one(aid: str) -> tuple[bool, str, str, int]:
             t0 = time.time()
             row = row_by_id.get(aid) or {}
             file_name = str(row.get("file_name") or row.get("name") or aid).strip()
+            auth_index = str(row.get("auth_index") or "").strip()
 
             if not file_name:
                 cost_ms = int((time.time() - t0) * 1000)
-                return False, "缺少账号文件名", cost_ms
+                return False, "失败", "缺少账号文件名", cost_ms
+
+            if not auth_index:
+                cost_ms = int((time.time() - t0) * 1000)
+                return False, "失败", "缺少 authIndex，无法调用 api-call 测活", cost_ms
 
             if bool(row.get("disabled")):
                 cost_ms = int((time.time() - t0) * 1000)
-                return False, "账号已禁用", cost_ms
+                return False, "封禁", "账号已禁用", cost_ms
 
             if bool(row.get("unavailable")):
                 cost_ms = int((time.time() - t0) * 1000)
-                return False, "账号不可用", cost_ms
+                return False, "封禁", "账号不可用", cost_ms
 
-            q = urllib.parse.urlencode({"name": file_name})
-            url = f"{base.rstrip('/')}/auth-files/models?{q}"
-            code, text = _http_get(
+            url = f"{base.rstrip('/')}/api-call"
+            payload = {
+                "authIndex": auth_index,
+                "method": "GET",
+                "url": "https://chatgpt.com/backend-api/wham/usage",
+                "header": {
+                    "Authorization": "Bearer $TOKEN$",
+                    "Content-Type": "application/json",
+                    "User-Agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+                },
+            }
+            account_id = str(row.get("account_id") or "").strip()
+            if account_id:
+                payload["header"]["Chatgpt-Account-Id"] = account_id
+
+            req_headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": auth,
+            }
+            code, text = _http_post_json(
                 url,
-                headers,
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                req_headers,
                 verify_ssl=verify_ssl,
-                timeout=90,
                 proxy=proxy_arg,
+                timeout=90,
             )
 
             summary = ""
+            status_text = "失败"
             success = False
             if 200 <= code < 300:
                 try:
                     payload = json.loads(text) if (text or "").strip() else {}
                 except Exception:
                     payload = {}
-                models = payload.get("models") if isinstance(payload, dict) else []
-                if isinstance(models, list):
-                    summary = f"检查通过，模型 {len(models)} 个"
-                else:
+                http_status = int(payload.get("status_code") or 0) if isinstance(payload, dict) else 0
+                body_text = str(payload.get("body") or "") if isinstance(payload, dict) else ""
+                msg = ""
+                try:
+                    body_obj = json.loads(body_text) if body_text.strip().startswith("{") else {}
+                except Exception:
+                    body_obj = {}
+                if isinstance(body_obj, dict):
+                    err = body_obj.get("error")
+                    if isinstance(err, dict):
+                        msg = str(err.get("message") or "").strip()
+
+                if 200 <= http_status < 300:
+                    success = True
+                    status_text = "成功"
                     summary = "检查通过"
-                success = True
+                elif msg == "Your authentication token has been invalidated. Please try signing in again.":
+                    success = False
+                    status_text = "Token过期"
+                    summary = "token_invalidated"
+                elif 400 <= http_status < 500:
+                    success = False
+                    status_text = "封禁"
+                    summary = f"HTTP {http_status}"
+                else:
+                    success = False
+                    status_text = "失败"
+                    summary = f"HTTP {http_status or code}"
+
+                if msg:
+                    summary = f"{summary}: {msg}" if summary else msg
             else:
                 snippet = (text or "")[:220].replace("\n", " ")
                 summary = f"HTTP {code}: {snippet}"
                 if code in {401, 403}:
+                    status_text = "失败"
                     summary = "管理密钥无效或无权限"
 
             cost_ms = int((time.time() - t0) * 1000)
-            return success, summary, cost_ms
+            return success, status_text, summary, cost_ms
 
         def _worker(worker_no: int, queue: Queue[str]) -> None:
             nonlocal ok, fail
@@ -734,11 +785,11 @@ def _batch_test_remote_accounts_cliproxy(service, ordered_ids: list[str]) -> dic
                     return
 
                 service.log(f"[批量测试-CLIProxyAPI-W{worker_no}] 开始 id={aid}")
-                success, summary, cost_ms = _run_one(aid)
+                success, status_text, summary, cost_ms = _run_one(aid)
                 set_remote_test_state(
                     service,
                     aid,
-                    status_text="成功" if success else "失败",
+                    status_text=status_text,
                     summary=summary,
                     duration_ms=cost_ms,
                 )
@@ -755,6 +806,7 @@ def _batch_test_remote_accounts_cliproxy(service, ordered_ids: list[str]) -> dic
                         {
                             "id": aid,
                             "success": success,
+                            "status": status_text,
                             "summary": summary,
                             "duration_ms": cost_ms,
                         }

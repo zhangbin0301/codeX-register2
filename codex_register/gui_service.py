@@ -44,6 +44,7 @@ from .gui_service_data_ops import (
     build_email_source_files_map as _data_build_email_source_files_map,
     build_local_account_index as _data_build_local_account_index,
     delete_local_accounts as _data_delete_local_accounts,
+    delete_local_accounts_db_only as _data_delete_local_accounts_db_only,
     delete_json_files as _data_delete_json_files,
     export_codex_accounts as _data_export_codex_accounts,
     export_sub2api_accounts as _data_export_sub2api_accounts,
@@ -568,6 +569,14 @@ class RegisterService:
                             return val
 
         return ""
+
+    @staticmethod
+    def _extract_email_like_text(raw: Any) -> str:
+        text = str(raw or "").strip().lower()
+        if not text:
+            return ""
+        m = re.search(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", text)
+        return str(m.group(0)).strip() if m else ""
 
     @staticmethod
     def _normalize_repo_slug(raw: Any) -> str:
@@ -2698,7 +2707,7 @@ class RegisterService:
                 )
             max_attempts = max(per_file_num * 50, per_file_num + 100)
             self.log(
-                f"本轮参数：文件 {num_files} × 每文件 {per_file_num} = 总目标 {total_target}，"
+                f"本轮参数：计划注册 {total_target}，"
                 f"并发 {worker_count}，冷却 {smin}-{smax}s，"
                 f"加速模式 {'开启' if fast_mode else '关闭'}，最大尝试 {max_attempts}"
             )
@@ -3116,8 +3125,8 @@ class RegisterService:
                             with state_lock:
                                 ok_now = ok
                             self._set_status(
-                                f"文件 {file_no}/{num_files} · 成功 {ok_now}/{file_target} · "
-                                f"总 {progress_base + ok_now}/{total_target}"
+                                f"成功 {progress_base + ok_now}/{total_target} · "
+                                f"当前批 {ok_now}/{file_target}"
                             )
 
                             need_retry = False
@@ -3287,8 +3296,8 @@ class RegisterService:
                                     started_now = attempts_started
                                 self._set_progress((progress_base + ok_now) / total_target)
                                 self._set_status(
-                                    f"文件 {file_no}/{num_files} · 成功 {ok_now}/{file_target} · "
-                                    f"总 {progress_base + ok_now}/{total_target} · "
+                                    f"成功 {progress_base + ok_now}/{total_target} · "
+                                    f"当前批 {ok_now}/{file_target} · "
                                     f"尝试 {done_now}/{started_now}"
                                 )
                                 task_queue.task_done()
@@ -3347,12 +3356,12 @@ class RegisterService:
                 file_ok = ok_final >= file_target
                 if file_ok:
                     self.log(
-                        f"[文件 {file_no}/{num_files}] 完成 "
+                        f"[批次 {file_no}] 完成 "
                         f"(成功 {ok_final}/{file_target}，补位 {extra_final} 次)"
                     )
                 else:
                     self.log(
-                        f"[文件 {file_no}/{num_files}] 结束 "
+                        f"[批次 {file_no}] 结束 "
                         f"(成功 {ok_final}/{file_target}，尝试 {done_final}/{started_final})"
                     )
                 return ok_final, started_final, extra_final, file_ok
@@ -3361,7 +3370,7 @@ class RegisterService:
                 if self._stop.is_set():
                     break
                 acc_file = r_with_pwd._init_accounts_file(outdir)
-                self.log(f"[文件 {file_no}/{num_files}] Accounts: {acc_file}")
+                self.log(f"[批次 {file_no}] Accounts: {acc_file}")
                 file_ok_count, _, _, file_ok = _run_single_file(file_no)
                 global_ok += file_ok_count
                 if file_ok:
@@ -3369,7 +3378,7 @@ class RegisterService:
                 else:
                     all_files_ok = False
                     if not self._stop.is_set():
-                        self.log(f"[文件 {file_no}/{num_files}] 未补齐，停止后续文件创建")
+                        self.log(f"[批次 {file_no}] 未补齐，停止后续批次")
                     break
 
             with self._lock:
@@ -3407,18 +3416,15 @@ class RegisterService:
 
             if self._stop.is_set() and global_ok < total_target:
                 tag = (
-                    f"已停止 (成功 {global_ok}/{total_target}，"
-                    f"完成文件 {completed_files}/{num_files})"
+                    f"已停止 (成功 {global_ok}/{total_target}，完成批次 {completed_files})"
                 )
             elif all_files_ok and completed_files == num_files:
                 tag = (
-                    f"完成 (成功 {global_ok}/{total_target}，"
-                    f"文件 {completed_files}/{num_files})"
+                    f"完成 (成功 {global_ok}/{total_target})"
                 )
             else:
                 tag = (
-                    f"结束 (成功 {global_ok}/{total_target}，"
-                    f"完成文件 {completed_files}/{num_files})，有文件未补齐"
+                    f"结束 (成功 {global_ok}/{total_target})，有批次未补齐"
                 )
             self.log(tag)
         except Exception as e:
@@ -4135,7 +4141,11 @@ class RegisterService:
     def revive_remote_tokens(self, ids: list[Any]) -> dict[str, Any]:
         return _remote_revive_remote_tokens(self, ids)
 
-    def _delete_remote_accounts_cliproxy(self, ordered_ids: list[str]) -> dict[str, Any]:
+    def _delete_remote_accounts_cliproxy(
+        self,
+        ordered_ids: list[str],
+        delete_local: bool = False,
+    ) -> dict[str, Any]:
         base, auth, verify_ssl, proxy_arg = self._cliproxy_management_context()
         headers = {
             "Accept": "application/json",
@@ -4151,6 +4161,7 @@ class RegisterService:
         ok = 0
         fail = 0
         deleted_ids: set[str] = set()
+        deleted_emails: set[str] = set()
         results: list[dict[str, Any]] = []
 
         for i, aid in enumerate(ordered_ids, start=1):
@@ -4201,6 +4212,11 @@ class RegisterService:
             if success:
                 ok += 1
                 deleted_ids.add(aid)
+                em = self._extract_email_like_text(
+                    row.get("email") or row.get("name") or row.get("groups") or row.get("file_name")
+                )
+                if em:
+                    deleted_emails.add(em)
                 self.log(f"[批量删除-CLIProxyAPI] id={aid} 成功")
             else:
                 fail += 1
@@ -4227,15 +4243,24 @@ class RegisterService:
                 self._remote_total = max(0, int(self._remote_total) - len(deleted_ids))
 
         self.log(f"[批量删除-CLIProxyAPI] 结束：成功 {ok}，失败 {fail}")
+        local_deleted = 0
+        if delete_local and deleted_emails:
+            try:
+                local_deleted = int(
+                    (_data_delete_local_accounts_db_only(self, sorted(deleted_emails)) or {}).get("deleted") or 0
+                )
+            except Exception as e:
+                self.log(f"[批量删除-CLIProxyAPI] 本地数据库删除失败: {e}")
         return {
             "ok": ok,
             "fail": fail,
             "total": len(ordered_ids),
             "deleted": sorted(deleted_ids),
+            "local_deleted": int(local_deleted),
             "results": results,
         }
 
-    def delete_remote_accounts(self, ids: list[Any]) -> dict[str, Any]:
+    def delete_remote_accounts(self, ids: list[Any], delete_local: bool = False) -> dict[str, Any]:
         """批量删除远端账号。"""
         ordered_ids: list[str] = []
         seen: set[str] = set()
@@ -4258,7 +4283,7 @@ class RegisterService:
             self.cfg.get("remote_account_provider") or "sub2api"
         )
         if remote_provider == "cliproxyapi":
-            return self._delete_remote_accounts_cliproxy(ordered_ids)
+            return self._delete_remote_accounts_cliproxy(ordered_ids, delete_local)
 
         tok = str(self.cfg.get("accounts_sync_bearer_token") or "").strip()
         base = str(self.cfg.get("accounts_list_api_base") or "").strip()
@@ -4274,7 +4299,14 @@ class RegisterService:
         ok = 0
         fail = 0
         deleted_ids: set[str] = set()
+        deleted_emails: set[str] = set()
         results: list[dict[str, Any]] = []
+
+        with self._lock:
+            row_by_id = {
+                str(row.get("id") or "").strip(): dict(row)
+                for row in self._remote_rows
+            }
 
         for i, aid in enumerate(ordered_ids, start=1):
             self.log(f"[批量删除] 开始 {i}/{len(ordered_ids)}: id={aid}")
@@ -4322,6 +4354,12 @@ class RegisterService:
             if success:
                 ok += 1
                 deleted_ids.add(aid)
+                row = row_by_id.get(aid) or {}
+                em = self._extract_email_like_text(
+                    row.get("email") or row.get("name") or row.get("groups") or row.get("file_name")
+                )
+                if em:
+                    deleted_emails.add(em)
                 self.log(f"[批量删除] id={aid} 成功")
             else:
                 fail += 1
@@ -4348,11 +4386,20 @@ class RegisterService:
                 self._remote_total = max(0, int(self._remote_total) - len(deleted_ids))
 
         self.log(f"[批量删除] 结束：成功 {ok}，失败 {fail}")
+        local_deleted = 0
+        if delete_local and deleted_emails:
+            try:
+                local_deleted = int(
+                    (_data_delete_local_accounts_db_only(self, sorted(deleted_emails)) or {}).get("deleted") or 0
+                )
+            except Exception as e:
+                self.log(f"[批量删除] 本地数据库删除失败: {e}")
         return {
             "ok": ok,
             "fail": fail,
             "total": len(ordered_ids),
             "deleted": sorted(deleted_ids),
+            "local_deleted": int(local_deleted),
             "results": results,
         }
 
