@@ -1492,6 +1492,13 @@ class RegisterService:
             "cliproxy_management_key",
             "accounts_list_timezone",
             "codex_export_dir",
+            "cf_routing_api_token",
+            "cf_routing_zone_id",
+            "cf_routing_domain",
+            "gmail_api_client_id",
+            "gmail_api_client_secret",
+            "gmail_api_refresh_token",
+            "gmail_api_user",
         ]
         for key in str_keys:
             if key in data:
@@ -1526,6 +1533,11 @@ class RegisterService:
             cfg["hero_sms_auto_pick_country"] = self._to_bool(
                 data.get("hero_sms_auto_pick_country"),
                 bool(cfg.get("hero_sms_auto_pick_country", False)),
+            )
+        if "cf_routing_cleanup" in data:
+            cfg["cf_routing_cleanup"] = self._to_bool(
+                data.get("cf_routing_cleanup"),
+                bool(cfg.get("cf_routing_cleanup", True)),
             )
         if "mailfree_random_domain" in data:
             cfg["mailfree_random_domain"] = self._to_bool(
@@ -1753,6 +1765,14 @@ class RegisterService:
         os.environ["LUCKYOUS_SPECIFIED_EMAIL"] = str(
             self.cfg.get("luckyous_specified_email") or ""
         ).strip().lower()
+        os.environ["CF_ROUTING_API_TOKEN"] = str(self.cfg.get("cf_routing_api_token") or "").strip()
+        os.environ["CF_ROUTING_ZONE_ID"] = str(self.cfg.get("cf_routing_zone_id") or "").strip()
+        os.environ["CF_ROUTING_DOMAIN"] = str(self.cfg.get("cf_routing_domain") or "").strip()
+        os.environ["CF_ROUTING_CLEANUP"] = "1" if self.cfg.get("cf_routing_cleanup", True) else "0"
+        os.environ["GMAIL_API_CLIENT_ID"] = str(self.cfg.get("gmail_api_client_id") or "").strip()
+        os.environ["GMAIL_API_CLIENT_SECRET"] = str(self.cfg.get("gmail_api_client_secret") or "").strip()
+        os.environ["GMAIL_API_REFRESH_TOKEN"] = str(self.cfg.get("gmail_api_refresh_token") or "").strip()
+        os.environ["GMAIL_API_USER"] = str(self.cfg.get("gmail_api_user") or "").strip()
         os.environ["MAIL_SERVICE_PROVIDER"] = normalize_mail_provider(
             self.cfg.get("mail_service_provider") or "mailfree"
         )

@@ -70,6 +70,14 @@ DEFAULT_CONFIG = {
     "gmail_imap_port": 993,
     "gmail_alias_tag_len": 8,
     "gmail_alias_mix_googlemail": True,
+    "cf_routing_api_token": "",
+    "cf_routing_zone_id": "",
+    "cf_routing_domain": "",
+    "cf_routing_cleanup": True,
+    "gmail_api_client_id": "",
+    "gmail_api_client_secret": "",
+    "gmail_api_refresh_token": "",
+    "gmail_api_user": "",
     "hero_sms_enabled": False,
     "hero_sms_api_key": "",
     "hero_sms_service": "",
@@ -180,6 +188,15 @@ def load_config() -> dict[str, Any]:
             cfg["flclash_rotate_every"] = int(env.get("FLCLASH_ROTATE_EVERY", "3") or 3)
         except Exception:
             cfg["flclash_rotate_every"] = 3
+        cfg["cf_routing_api_token"] = env.get("CF_ROUTING_API_TOKEN", env.get("CF_API_TOKEN", ""))
+        cfg["cf_routing_zone_id"] = env.get("CF_ROUTING_ZONE_ID", env.get("CF_ZONE_ID", ""))
+        cfg["cf_routing_domain"] = env.get("CF_ROUTING_DOMAIN", env.get("EMAIL_DOMAIN", ""))
+        cleanup_v = env.get("CF_ROUTING_CLEANUP", "1").strip().lower()
+        cfg["cf_routing_cleanup"] = cleanup_v not in ("0", "false", "no")
+        cfg["gmail_api_client_id"] = env.get("GMAIL_API_CLIENT_ID", env.get("GMAIL_CLIENT_ID", ""))
+        cfg["gmail_api_client_secret"] = env.get("GMAIL_API_CLIENT_SECRET", env.get("GMAIL_CLIENT_SECRET", ""))
+        cfg["gmail_api_refresh_token"] = env.get("GMAIL_API_REFRESH_TOKEN", env.get("GMAIL_REFRESH_TOKEN", ""))
+        cfg["gmail_api_user"] = env.get("GMAIL_API_USER", env.get("GMAIL_USER", ""))
         cfg["gmail_imap_user"] = env.get("GMAIL_IMAP_USER", env.get("IMAP_USER", ""))
         cfg["gmail_imap_pass"] = env.get("GMAIL_IMAP_PASS", env.get("IMAP_PASS", ""))
         cfg["gmail_alias_emails"] = env.get("GMAIL_ALIAS_EMAILS", env.get("EMAIL_LIST", ""))

@@ -131,6 +131,14 @@
           gmail_imap_port: 993,
           gmail_alias_tag_len: 8,
           gmail_alias_mix_googlemail: true,
+          cf_routing_api_token: "",
+          cf_routing_zone_id: "",
+          cf_routing_domain: "",
+          cf_routing_cleanup: true,
+          gmail_api_client_id: "",
+          gmail_api_client_secret: "",
+          gmail_api_refresh_token: "",
+          gmail_api_user: "",
           hero_sms_enabled: false,
           hero_sms_reuse_phone: false,
           hero_sms_api_key: "",
@@ -364,6 +372,13 @@
             mailTotal: 0
           },
           gmail: {
+            domains: [],
+            mailboxRows: [],
+            selectedMailbox: "",
+            mailRows: [],
+            mailTotal: 0
+          },
+          cf_email_routing: {
             domains: [],
             mailboxRows: [],
             selectedMailbox: "",
@@ -960,6 +975,7 @@
           if (["luckyous", "luckyous_api", "luckymail", "lucky_mail", "luckyous_openapi"].includes(val)) return "luckyous";
           if (val === "graph") return "graph";
           if (val === "gmail" || val === "imap") return "gmail";
+          if (["cf_email_routing", "cf_routing", "cloudflare_email_routing", "cloudflare_routing"].includes(val)) return "cf_email_routing";
           return "mailfree";
         }
 
@@ -1531,6 +1547,14 @@
           settingsForm.gmail_imap_port = Number(cfg.gmail_imap_port || 993);
           settingsForm.gmail_alias_tag_len = Number(cfg.gmail_alias_tag_len || 8);
           settingsForm.gmail_alias_mix_googlemail = cfg.gmail_alias_mix_googlemail !== false;
+          settingsForm.cf_routing_api_token = String(cfg.cf_routing_api_token || "");
+          settingsForm.cf_routing_zone_id = String(cfg.cf_routing_zone_id || "");
+          settingsForm.cf_routing_domain = String(cfg.cf_routing_domain || "");
+          settingsForm.cf_routing_cleanup = cfg.cf_routing_cleanup !== false;
+          settingsForm.gmail_api_client_id = String(cfg.gmail_api_client_id || "");
+          settingsForm.gmail_api_client_secret = String(cfg.gmail_api_client_secret || "");
+          settingsForm.gmail_api_refresh_token = String(cfg.gmail_api_refresh_token || "");
+          settingsForm.gmail_api_user = String(cfg.gmail_api_user || "");
           settingsForm.hero_sms_enabled = !!cfg.hero_sms_enabled;
           settingsForm.hero_sms_reuse_phone = !!cfg.hero_sms_reuse_phone;
           settingsForm.hero_sms_api_key = String(cfg.hero_sms_api_key || "");
@@ -1621,6 +1645,14 @@
             gmail_imap_port: Number(settingsForm.gmail_imap_port || 993),
             gmail_alias_tag_len: Number(settingsForm.gmail_alias_tag_len || 8),
             gmail_alias_mix_googlemail: !!settingsForm.gmail_alias_mix_googlemail,
+            cf_routing_api_token: String(settingsForm.cf_routing_api_token || "").trim(),
+            cf_routing_zone_id: String(settingsForm.cf_routing_zone_id || "").trim(),
+            cf_routing_domain: String(settingsForm.cf_routing_domain || "").trim(),
+            cf_routing_cleanup: !!settingsForm.cf_routing_cleanup,
+            gmail_api_client_id: String(settingsForm.gmail_api_client_id || "").trim(),
+            gmail_api_client_secret: String(settingsForm.gmail_api_client_secret || "").trim(),
+            gmail_api_refresh_token: String(settingsForm.gmail_api_refresh_token || "").trim(),
+            gmail_api_user: String(settingsForm.gmail_api_user || "").trim(),
             hero_sms_enabled: !!settingsForm.hero_sms_enabled,
             hero_sms_reuse_phone: !!settingsForm.hero_sms_reuse_phone,
             hero_sms_api_key: String(settingsForm.hero_sms_api_key || "").trim(),

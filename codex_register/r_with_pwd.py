@@ -1637,6 +1637,14 @@ def _mail_service_signature() -> tuple[Any, ...]:
     gmail_alias_mix_googlemail = str(
         os.getenv("GMAIL_ALIAS_MIX_GOOGLEMAIL", "1") or "1"
     ).strip().lower() in {"1", "true", "yes", "on"}
+    cf_routing_api_token = str(os.getenv("CF_ROUTING_API_TOKEN", "") or "").strip()
+    cf_routing_zone_id = str(os.getenv("CF_ROUTING_ZONE_ID", "") or "").strip()
+    cf_routing_domain = str(os.getenv("CF_ROUTING_DOMAIN", "") or "").strip()
+    cf_routing_cleanup = str(os.getenv("CF_ROUTING_CLEANUP", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    gmail_api_client_id = str(os.getenv("GMAIL_API_CLIENT_ID", "") or "").strip()
+    gmail_api_client_secret = str(os.getenv("GMAIL_API_CLIENT_SECRET", "") or "").strip()
+    gmail_api_refresh_token = str(os.getenv("GMAIL_API_REFRESH_TOKEN", "") or "").strip()
+    gmail_api_user = str(os.getenv("GMAIL_API_USER", "") or "").strip()
     return (
         provider,
         str(WORKER_DOMAIN or "").strip().rstrip("/"),
@@ -1667,6 +1675,14 @@ def _mail_service_signature() -> tuple[Any, ...]:
         gmail_imap_port,
         gmail_alias_tag_len,
         gmail_alias_mix_googlemail,
+        cf_routing_api_token,
+        cf_routing_zone_id,
+        cf_routing_domain,
+        cf_routing_cleanup,
+        gmail_api_client_id,
+        gmail_api_client_secret,
+        gmail_api_refresh_token,
+        gmail_api_user,
     )
 
 
@@ -1717,7 +1733,23 @@ def _get_mail_service_client():
         gmail_imap_port,
         gmail_alias_tag_len,
         gmail_alias_mix_googlemail,
+        cf_routing_api_token,
+        cf_routing_zone_id,
+        cf_routing_domain,
+        cf_routing_cleanup,
+        gmail_api_client_id,
+        gmail_api_client_secret,
+        gmail_api_refresh_token,
+        gmail_api_user,
     ) = sig
+    os.environ["CF_ROUTING_API_TOKEN"] = cf_routing_api_token
+    os.environ["CF_ROUTING_ZONE_ID"] = cf_routing_zone_id
+    os.environ["CF_ROUTING_DOMAIN"] = cf_routing_domain
+    os.environ["CF_ROUTING_CLEANUP"] = "1" if cf_routing_cleanup else "0"
+    os.environ["GMAIL_API_CLIENT_ID"] = gmail_api_client_id
+    os.environ["GMAIL_API_CLIENT_SECRET"] = gmail_api_client_secret
+    os.environ["GMAIL_API_REFRESH_TOKEN"] = gmail_api_refresh_token
+    os.environ["GMAIL_API_USER"] = gmail_api_user
     os.environ["MAIL_DOMAINS"] = mail_domains
     os.environ["CF_TEMP_ADMIN_AUTH"] = cf_temp_admin_auth
     os.environ["ADMIN_AUTH"] = cf_temp_admin_auth
@@ -1916,6 +1948,14 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             _info("Graph 模式：忽略 MailFree 域名/前缀规则，直接从账号池取邮箱")
         elif provider == "mail_curl":
             _info("Mail-Curl 模式：按邮箱 ID 轮询收件")
+        elif provider == "cf_email_routing":
+            cf_r_domain = str(os.getenv("CF_ROUTING_DOMAIN", "") or "").strip()
+            cf_r_user = str(os.getenv("GMAIL_API_USER", "") or "").strip()
+            _info(
+                "CF Email Routing 模式："
+                f"域名={cf_r_domain or '-'}，"
+                f"转发至={cf_r_user or '-'}"
+            )
         elif provider == "luckyous":
             lucky_project = str(os.getenv("LUCKYOUS_PROJECT_CODE", "") or "").strip()
             lucky_type = str(os.getenv("LUCKYOUS_EMAIL_TYPE", "ms_graph") or "").strip().lower()

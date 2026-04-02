@@ -40,6 +40,8 @@ def normalize_mail_provider(raw: Any) -> str:
         return "graph"
     if val in {"luckyous", "luckyous_api", "luckymail", "lucky_mail", "luckyous_openapi"}:
         return "luckyous"
+    if val in {"cf_email_routing", "cf_routing", "cloudflare_email_routing", "cloudflare_routing"}:
+        return "cf_email_routing"
     return "mailfree"
 
 
@@ -53,6 +55,7 @@ def available_mail_providers() -> list[dict[str, str]]:
         {"label": "Luckyous API", "value": "luckyous"},
         {"label": "Gmail IMAP", "value": "gmail"},
         {"label": "Microsoft Graph", "value": "graph"},
+        {"label": "CF Email Routing", "value": "cf_email_routing"},
     ]
 
 
@@ -2815,6 +2818,13 @@ def build_mail_service(
         from .mail_providers.graph import build_graph_service
 
         return build_graph_service(
+            verify_ssl=verify_ssl,
+            logger=logger,
+        )
+    if p == "cf_email_routing":
+        from .mail_providers.cf_email_routing import build_cf_email_routing_service
+
+        return build_cf_email_routing_service(
             verify_ssl=verify_ssl,
             logger=logger,
         )

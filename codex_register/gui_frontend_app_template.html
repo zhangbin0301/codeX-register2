@@ -378,6 +378,9 @@
                         <n-tab-pane name="graph" tab="Microsoft Graph">
                           <span style="display:none"></span>
                         </n-tab-pane>
+                        <n-tab-pane name="cf_email_routing" tab="CF Email Routing">
+                          <span style="display:none"></span>
+                        </n-tab-pane>
                       </n-tabs>
                       <div class="toolbar mail-top-toolbar">
                         <n-button class="toolbar-btn" :loading="loading.mail_overview || loading.save" @click="refreshMailOverview(true)">保存并刷新</n-button>
@@ -632,6 +635,63 @@
                           @click="deleteSelectedGraphAccountFile"
                         >删除当前文件</n-button>
                         <n-button class="toolbar-btn" :loading="loading.graph_files" @click="refreshGraphAccountFiles(true)">刷新文件列表</n-button>
+                      </div>
+                      <div v-else-if="mailProviderTab === 'cf_email_routing'" style="margin-top: 10px">
+                        <div class="meta" style="margin-bottom: 8px; font-weight: 500">Cloudflare Email Routing</div>
+                        <div class="toolbar">
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.cf_routing_api_token"
+                            type="password"
+                            show-password-on="click"
+                            placeholder="Cloudflare API Token（需 Zone:Email Routing:Edit 权限）"
+                          />
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.cf_routing_zone_id"
+                            placeholder="Cloudflare Zone ID"
+                          />
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.cf_routing_domain"
+                            placeholder="邮箱域名（如 example.com）"
+                          />
+                          <n-switch v-model:value="settingsForm.cf_routing_cleanup" />
+                          <span class="meta">注册后自动清理规则</span>
+                        </div>
+                        <div class="meta" style="margin-top: 12px; margin-bottom: 8px; font-weight: 500">Gmail API（OAuth2 收件）</div>
+                        <div class="toolbar">
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.gmail_api_user"
+                            placeholder="Gmail 收件地址（转发目标，如 yourname@gmail.com）"
+                          />
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.gmail_api_client_id"
+                            placeholder="Google Cloud OAuth Client ID"
+                          />
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.gmail_api_client_secret"
+                            type="password"
+                            show-password-on="click"
+                            placeholder="Google Cloud OAuth Client Secret"
+                          />
+                          <n-input
+                            class="toolbar-path"
+                            v-model:value="settingsForm.gmail_api_refresh_token"
+                            type="password"
+                            show-password-on="click"
+                            placeholder="Gmail OAuth Refresh Token"
+                          />
+                        </div>
+                      </div>
+                      <div v-if="mailProviderTab === 'cf_email_routing'" class="meta" style="margin-top: 6px">
+                        通过 Cloudflare Email Routing 动态创建转发规则（<code>reg_xxx@域名</code> → Gmail），使用 Gmail API（OAuth2）轮询收件箱提取验证码。
+                      </div>
+                      <div v-if="mailProviderTab === 'cf_email_routing'" class="meta" style="margin-top: 4px">
+                        Cloudflare Token 权限要求：<code>Zone → Email Routing → Edit</code>。Gmail 需在 Google Cloud Console 创建 OAuth 凭据并获取 Refresh Token。
                       </div>
                       <div v-if="mailProviderTab === 'gmail'" class="meta" style="margin-top: 6px">
                         Gmail 必须开启 IMAP 并使用应用专用密码；支持按别名池自动生成 <code>user+tag@gmail.com</code>。
