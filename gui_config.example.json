@@ -63,6 +63,16 @@
   "gmail_imap_port": 993,
   "gmail_alias_tag_len": 8,
   "gmail_alias_mix_googlemail": true,
+
+  "cf_routing_api_token": "",
+  "cf_routing_zone_id": "",
+  "cf_routing_domain": "",
+  "cf_routing_cleanup": true,
+  "gmail_api_client_id": "",
+  "gmail_api_client_secret": "",
+  "gmail_api_refresh_token": "",
+  "gmail_api_user": "",
+
   "hero_sms_enabled": false,
   "hero_sms_api_key": "",
   "hero_sms_service": "",
