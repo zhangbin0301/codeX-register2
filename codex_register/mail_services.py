@@ -2564,19 +2564,6 @@ class MicrosoftGraphService(MailServiceBase):
         return rows
 
     def _load_accounts_from_api(self, *, proxies: Any = None) -> list[dict[str, Any]]:
-        pre_status, pre_payload, pre_text = self._api_request(
-            "POST",
-            "/api/open/messages",
-            json_body={"id": 1},
-            proxies=proxies,
-            timeout=max(5, int(round(self._api_scan_req_timeout))),
-        )
-        if self._is_api_token_invalid(pre_status, pre_payload, pre_text):
-            raise MailServiceError(
-                "Graph 接口模式鉴权失败：开放接口 token 无效。"
-                "请填写上游 MAIL_API_TOKEN（不是后台登录密码）。"
-            )
-
         paths = [
             "/api/open/accounts",
             "/api/open/accounts/list",
@@ -2585,6 +2572,7 @@ class MicrosoftGraphService(MailServiceBase):
             "/api/open/mailbox/list",
         ]
         last_err = ""
+        login_required_hit = False
         for path in paths:
             status, payload, text = self._api_request("GET", path, proxies=proxies, timeout=30)
             if status == 404:
@@ -2598,6 +2586,7 @@ class MicrosoftGraphService(MailServiceBase):
                     )
                 last_err = f"{path} HTTP {status}: {err_detail or text}"
                 if self._is_api_login_required(status, payload, text):
+                    login_required_hit = True
                     break
                 continue
 
@@ -2619,6 +2608,13 @@ class MicrosoftGraphService(MailServiceBase):
                 self._api_accounts_discovered_by_scan = False
                 return rows
             last_err = f"{path} 返回成功但未包含可用账号列表"
+
+        if login_required_hit:
+            raise MailServiceError(
+                "Graph 接口模式拉取账号列表失败：上游返回未登录或会话过期。"
+                "请确认已调用开放接口 /api/open/accounts，"
+                "并使用 MAIL_API_TOKEN（或 INGEST_TOKEN 回退）进行鉴权。"
+            )
 
         scanned_rows = self._discover_api_accounts_by_id_scan(proxies=proxies)
         if scanned_rows:
