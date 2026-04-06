@@ -2772,58 +2772,6 @@ class MicrosoftGraphService(MailServiceBase):
             raise MailServiceError(f"Graph 接口账号池中不存在该邮箱: {target}")
         raise MailServiceError(f"Graph 账号文件中不存在该邮箱: {target}")
 
-    @staticmethod
-    def _extract_api_account_payload(payload: Any) -> dict[str, Any]:
-        if isinstance(payload, dict):
-            for key in ("data", "item", "account", "result", "row"):
-                val = payload.get(key)
-                if isinstance(val, dict):
-                    return val
-            return payload
-        if isinstance(payload, list):
-            for it in payload:
-                if isinstance(it, dict):
-                    return it
-        return {}
-
-    @staticmethod
-    def _pick_str_value(*pairs: tuple[dict[str, Any], tuple[str, ...]]) -> str:
-        for src, keys in pairs:
-            if not isinstance(src, dict):
-                continue
-            for key in keys:
-                val = src.get(key)
-                if val is None:
-                    continue
-                text = str(val).strip()
-                if text:
-                    return text
-        return ""
-
-    def _load_api_account_detail(self, account_id: str, *, proxies: Any = None) -> dict[str, Any]:
-        aid = str(account_id or "").strip()
-        if not aid:
-            return {}
-        status, payload, text = self._api_request(
-            "GET",
-            f"/api/accounts/{urllib.parse.quote(aid, safe='')}",
-            proxies=proxies,
-            timeout=25,
-        )
-        if status == 404:
-            return {}
-        if not (200 <= status < 300):
-            if self._is_api_token_invalid(status, payload, text):
-                raise MailServiceError(
-                    "Graph 接口模式鉴权失败：开放接口 token 无效。"
-                    "请检查 graph_api_token 是否与上游 MAIL_API_TOKEN 一致。"
-                )
-            detail = self._api_error_message(payload, text)
-            raise MailServiceError(
-                f"Graph 接口读取账号详情失败: /api/accounts/{aid} HTTP {status}: {detail or text}"
-            )
-        return self._extract_api_account_payload(payload)
-
     def mark_account_registered(
         self,
         mailbox: str,
@@ -2843,69 +2791,28 @@ class MicrosoftGraphService(MailServiceBase):
         if not account_id:
             return False
 
-        detail = {}
-        try:
-            detail = self._load_api_account_detail(account_id, proxies=proxies)
-        except Exception:
-            detail = {}
-
-        account_val = self._pick_str_value(
-            (detail, ("account", "email", "address", "mailbox")),
-            (acc, ("email",)),
-        )
-        password_val = self._pick_str_value(
-            (detail, ("password",)),
-            (acc, ("password",)),
-        )
-        client_id_val = self._pick_str_value(
-            (detail, ("clientId", "client_id")),
-            (acc, ("client_id", "clientId")),
-        )
-        refresh_token_val = self._pick_str_value(
-            (detail, ("refreshToken", "refresh_token")),
-            (acc, ("refresh_token", "refreshToken")),
-        )
-        if not account_val or "@" not in account_val:
-            account_val = target
-
-        missing: list[str] = []
-        if not account_val:
-            missing.append("account")
-        if not password_val:
-            missing.append("password")
-        if not client_id_val:
-            missing.append("clientId")
-        if not refresh_token_val:
-            missing.append("refreshToken")
-        if missing:
-            raise MailServiceError(
-                "Graph 接口更新账号备注失败：缺少字段 "
-                + ", ".join(missing)
-            )
-
         body = {
-            "account": account_val,
-            "password": password_val,
-            "clientId": client_id_val,
-            "refreshToken": refresh_token_val,
             "remark": str(remark or "已注册").strip() or "已注册",
         }
         status, payload, text = self._api_request(
-            "PUT",
-            f"/api/accounts/{urllib.parse.quote(account_id, safe='')}",
+            "PATCH",
+            f"/api/open/accounts/{urllib.parse.quote(account_id, safe='')}/remark",
             json_body=body,
             proxies=proxies,
             timeout=25,
         )
         if not (200 <= status < 300):
+            if self._is_api_token_invalid(status, payload, text):
+                raise MailServiceError(
+                    "Graph 接口模式鉴权失败：开放接口 token 无效。"
+                    "请检查 graph_api_token 是否与上游 MAIL_API_TOKEN 一致。"
+                )
             detail_msg = self._api_error_message(payload, text)
             raise MailServiceError(
-                f"Graph 接口更新账号备注失败: /api/accounts/{account_id} HTTP {status}: {detail_msg or text}"
+                "Graph 接口更新账号备注失败: "
+                f"/api/open/accounts/{account_id}/remark HTTP {status}: {detail_msg or text}"
             )
 
-        acc["password"] = password_val
-        acc["client_id"] = client_id_val
-        acc["refresh_token"] = refresh_token_val
         acc["remark"] = body["remark"]
         return True
 

@@ -295,6 +295,15 @@ def _mark_graph_registered_email(
     proxies: Any = None,
     remark: str = "已注册",
 ) -> bool:
+    provider_now = normalize_mail_provider(
+        os.getenv("MAIL_SERVICE_PROVIDER", MAIL_SERVICE_PROVIDER)
+    )
+    if provider_now != "graph":
+        return False
+    graph_mode = str(os.getenv("GRAPH_ACCOUNTS_MODE", "file") or "file").strip().lower()
+    if graph_mode != "api":
+        return False
+
     target = str(email or "").strip().lower()
     if not target or "@" not in target:
         return False
